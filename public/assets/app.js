@@ -5,7 +5,8 @@
    ========================================================================== */
 
 var S = { sess:null, route:"painel", obraId:null, q:"", cat:{}, obras:[], usuarios:[],
-          log:[], ready:false, offline:false, precisaPrimeiro:false, grupos:{} };
+          log:[], ready:false, offline:false, precisaPrimeiro:false, grupos:{},
+          rascunho:null, original:"", salvoEm:null, salvando:false };
 
 var CHAVES_NORMATIVAS = ["normas","padroes","especificacoes","fornecedores_aprovados","ged","ged3738","cintas","cabos"];
 
@@ -501,6 +502,51 @@ function viewPainel(){
 /* ==========================================================================
    OBRAS E FOLHA DE DADOS
    ========================================================================== */
+function obraPorId(id){ var o=null; S.obras.forEach(function(x){ if(x._id===id) o=x; }); return o; }
+function abrirFolha(id){
+  var o=obraPorId(id);
+  if(!o) return;
+  S.obraId=id;
+  S.rascunho=JSON.parse(JSON.stringify(o));
+  S.original=JSON.stringify(o);
+  S.salvoEm=null;
+  S.route="folha";
+}
+function folhaAlterada(){ return !!S.rascunho && JSON.stringify(S.rascunho)!==S.original; }
+function fecharFolha(){ S.rascunho=null; S.original=""; S.salvoEm=null; }
+async function salvarFolha(){
+  if(!S.rascunho||S.salvando) return true;
+  S.salvando=true;
+  try{
+    await Store.salvarObra(S.rascunho);
+    var i=-1; S.obras.forEach(function(x,k){ if(x._id===S.rascunho._id) i=k; });
+    S.rascunho.atualizadoEm=new Date().toISOString();
+    S.rascunho.atualizadoPor=S.sess.nome;
+    if(i>=0) S.obras[i]=JSON.parse(JSON.stringify(S.rascunho));
+    S.original=JSON.stringify(S.rascunho);
+    S.salvoEm=new Date();
+    await Store.registrar("Salvou obra",S.rascunho._id,S.rascunho.empreendimento||"(sem nome)");
+    S.salvando=false;
+    toast("Obra salva");
+    return true;
+  }catch(e){
+    S.salvando=false;
+    toast("Não foi possível salvar: "+e.message);
+    return false;
+  }
+}
+function confirmarSaida(depois){
+  if(!folhaAlterada()) { fecharFolha(); depois(); return; }
+  modal("Alterações não salvas",
+    "<p>Esta obra tem alterações que ainda não foram gravadas.</p>",
+    async function(){ if(await salvarFolha()){ fecharFolha(); depois(); } else return false; },
+    "Salvar e sair");
+  var bg=document.querySelector(".modal-bg:last-of-type");
+  var rodape=bg.querySelector(".modal-f");
+  var descartar=el('<button class="btn danger">Sair sem salvar</button>');
+  descartar.addEventListener("click",function(){ bg.remove(); fecharFolha(); depois(); });
+  rodape.insertBefore(descartar,rodape.firstChild);
+}
 function viewObras(){
   var h='<div class="phead"><div><h2>Obras</h2>'+
     '<p class="desc">Cada obra guarda a própria folha de dados. Os cadastros ficam fora dela e são apenas referenciados.</p></div>'+
@@ -553,7 +599,7 @@ function campoHTML(c,o,errs){
 }
 
 function viewFolha(){
-  var o=null; S.obras.forEach(function(x){ if(x._id===S.obraId) o=x; });
+  var o=S.rascunho;
   if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
   var errs=validarObra(o), tot=totalCampos();
   var preench=tot-errs.filter(function(e){ return e.tipo==="obrigatorio"; }).length;
@@ -563,6 +609,16 @@ function viewFolha(){
   var h='<div class="phead"><div><h2>'+esc(o.empreendimento||"Nova obra")+"</h2>"+
     '<p class="desc">Folha de dados do cliente, da obra, do projeto e da empreiteira.</p></div>'+
     '<div class="actions"><button class="btn ghost" id="btnVoltar">Voltar para obras</button></div></div>';
+
+  var sujo=folhaAlterada();
+  h+='<div class="salvabar'+(sujo?" sujo":"")+'"><div class="estado">'+
+    (sujo?'<span class="ponto"></span>Alterações não salvas'
+        :(S.salvoEm?'<span class="ok">✓</span>Salvo às '+S.salvoEm.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})
+                   :'<span class="ok">✓</span>Sem alterações pendentes'))+
+    '</div><div class="acoes">'+
+    '<button class="btn ghost sm" id="btnDescartar"'+(sujo?"":" disabled")+'>Descartar</button>'+
+    '<button class="btn" id="btnSalvar"'+(sujo&&can("obra.edit")?"":" disabled")+'>'+
+    (S.salvando?"Salvando…":"Salvar")+'</button></div></div>';
 
   h+='<div class="consist'+(errs.length?" bad":"")+'"><div><strong>'+
     (errs.length?errs.length+" ponto"+(errs.length>1?"s":"")+" a resolver":"Folha consistente")+"</strong>"+
@@ -594,7 +650,7 @@ function viewFolha(){
       esc(s.titulo)+(se?' <span class="chip bad">'+se+"</span>":"")+"</h4></div>"+
       '<div class="sect-b"><div class="fgrid">'+s.campos.map(function(c){ return campoHTML(c,o,errs); }).join("")+"</div></div></div>";
   });
-  return h+'<p class="note">As alterações são gravadas automaticamente.</p>';
+  return h+'<p class="note">As alterações só vão para o banco quando você clicar em Salvar.</p>';
 }
 
 /* ==========================================================================
@@ -889,6 +945,12 @@ function render(){
   ligarEventos();
 }
 
+async function irPara(destino){
+  S.route=destino; S.q="";
+  MENU.forEach(function(g){ if(g.itens.some(function(i){ return i.r===destino; })) S.grupos[g.grp]=true; });
+  if(destino==="registro"){ await lerLog(); }
+  render();
+}
 function ligarEventos(){
   document.querySelectorAll(".rail .grp").forEach(function(gh){
     gh.addEventListener("click",function(){
@@ -900,10 +962,13 @@ function ligarEventos(){
   });
   document.querySelectorAll(".rail a").forEach(function(a){
     a.addEventListener("click",async function(){
-      S.route=a.getAttribute("data-r"); S.q="";
-      MENU.forEach(function(g){ if(g.itens.some(function(i){return i.r===S.route;})) S.grupos[g.grp]=true; });
-      if(S.route==="registro"){ await lerLog(); }
-      render();
+      var destino=a.getAttribute("data-r");
+      if(S.route==="folha"&&folhaAlterada()){
+        confirmarSaida(function(){ irPara(destino); });
+        return;
+      }
+      fecharFolha();
+      irPara(destino);
     });
   });
   var sair=document.getElementById("btnSair");
@@ -920,10 +985,10 @@ function ligarEventos(){
     try{ await Store.salvarObra(o); }catch(e){ return toast(e.message); }
     S.obras.push(o);
     await Store.registrar("Criou obra",o._id,"Nova obra");
-    S.obraId=o._id; S.route="folha"; render();
+    abrirFolha(o._id); render();
   });
   document.querySelectorAll("[data-obra]").forEach(function(b){
-    b.addEventListener("click",function(){ S.obraId=b.getAttribute("data-obra"); S.route="folha"; render(); }); });
+    b.addEventListener("click",function(){ abrirFolha(b.getAttribute("data-obra")); render(); }); });
   document.querySelectorAll("[data-del-obra]").forEach(function(b){
     b.addEventListener("click",function(){
       var id=b.getAttribute("data-del-obra"), o=null;
@@ -937,15 +1002,24 @@ function ligarEventos(){
     });
   });
   var volta=document.getElementById("btnVoltar");
-  if(volta) volta.addEventListener("click",function(){ S.route="obras"; render(); });
+  if(volta) volta.addEventListener("click",function(){
+    confirmarSaida(function(){ S.route="obras"; render(); }); });
+
+  var bs=document.getElementById("btnSalvar");
+  if(bs) bs.addEventListener("click",async function(){ render(); await salvarFolha(); render(); });
+  var bd=document.getElementById("btnDescartar");
+  if(bd) bd.addEventListener("click",function(){
+    modal("Descartar alterações","<p>As alterações feitas desde a última gravação serão perdidas.</p>",function(){
+      S.rascunho=JSON.parse(S.original); render();
+    },"Descartar"); });
 
   document.querySelectorAll(".sect-h").forEach(function(hd){
     hd.addEventListener("click",function(e){ if(e.target.closest("input,select")) return; hd.parentNode.classList.toggle("closed"); }); });
 
   document.querySelectorAll(".sect-b [data-k]").forEach(function(inp){
     var ev=(inp.tagName==="SELECT")?"change":"input";
-    inp.addEventListener(ev,async function(){
-      var o=null; S.obras.forEach(function(x){ if(x._id===S.obraId) o=x; });
+    inp.addEventListener(ev,function(){
+      var o=S.rascunho;
       if(!o) return;
       var k=inp.getAttribute("data-k"), v=inp.value;
       if(inp.type==="number") v=v===""?"":Number(v);
@@ -956,11 +1030,16 @@ function ligarEventos(){
         if(k==="municipioCli"&&mi) o.ufCli=mi.uf;
         if(k==="munEmp"&&mi) o.ufEmp=mi.uf;
       }
-      try{ await Store.salvarObra(o); }catch(e){}
       if(ev==="change"||inp.type==="date"){ render(); }
       else{
         var pend=validarObra(o), barra=document.querySelector(".consist .bar i");
         if(barra) barra.style.width=Math.round((totalCampos()-pend.filter(function(e){return e.tipo==="obrigatorio";}).length)/totalCampos()*100)+"%";
+        var bar=document.querySelector(".salvabar");
+        if(bar&&!bar.classList.contains("sujo")){
+          bar.classList.add("sujo");
+          bar.querySelector(".estado").innerHTML='<span class="ponto"></span>Alterações não salvas';
+          bar.querySelectorAll("button").forEach(function(b){ b.disabled=false; });
+        }
       }
     });
     inp.addEventListener("blur",function(){ if(inp.type!=="number"&&inp.tagName!=="SELECT") render(); });
@@ -1010,6 +1089,10 @@ function ligarEventos(){
 /* ==========================================================================
    INÍCIO
    ========================================================================== */
+window.addEventListener("beforeunload",function(e){
+  if(S.route==="folha"&&folhaAlterada()){ e.preventDefault(); e.returnValue=""; }
+});
+
 (async function(){
   render();
   Store=await criarStore();
