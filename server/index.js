@@ -143,7 +143,7 @@ async function api(req, res, url) {
   }
 
   if (rec === "catalogo" && m === "PUT") {
-    const NORMATIVAS = ["normas", "padroes", "especificacoes", "fornecedores_aprovados", "ged", "ged3738", "cintas", "cabos"];
+    const NORMATIVAS = ["anexo1", "normas", "padroes", "especificacoes", "fornecedores_aprovados", "ged", "ged3738", "cintas", "cabos"];
     const perm = NORMATIVAS.includes(id) ? "norm.edit" : "cad.edit";
     if (!pode(s, perm)) return json(res, 403, { erro: "Sem permissão." });
     await bd.gravarCatalogo(id, await lerCorpo(req));

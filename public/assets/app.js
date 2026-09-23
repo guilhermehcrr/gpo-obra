@@ -37,6 +37,27 @@ function toast(m){ var t=el('<div class="toast">'+esc(m)+"</div>"); document.bod
 async function sha(s){ var b=new TextEncoder().encode(s); var h=await crypto.subtle.digest("SHA-256",b);
   return Array.from(new Uint8Array(h)).map(function(x){return x.toString(16).padStart(2,"0");}).join(""); }
 function items(k){ var c=S.cat[k]; return (c&&c.items)||[]; }
+function revisaoDe(k){ var c=S.cat[k]; return (c&&c.revisao)||null; }
+function rotuloRevisao(k){ var r=revisaoDe(k); return r&&r.versao?r.versao:"não informada"; }
+// Tabelas cuja revisão é carimbada na obra, porque entram no cálculo ou no memorial.
+var TABELAS_NORMATIVAS=["anexo1","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
+function revisoesAtuais(){
+  var o={};
+  TABELAS_NORMATIVAS.forEach(function(k){ var r=revisaoDe(k); if(r&&r.versao) o[k]=r.versao; });
+  return o;
+}
+function revisoesDefasadas(obra){
+  var usadas=obra&&obra.revisoes, fora=[];
+  if(!usadas) return fora;
+  var atuais=revisoesAtuais();
+  Object.keys(usadas).forEach(function(k){
+    if(atuais[k]&&atuais[k]!==usadas[k]) fora.push({chave:k,usada:usadas[k],atual:atuais[k]});
+  });
+  return fora;
+}
+var NOME_TABELA={anexo1:"Anexo 1 — previsão de consumo",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
+  padroes:"Padrões de instalação",especificacoes:"Especificações técnicas",
+  fornecedores_aprovados:"Fornecedores aprovados",cintas:"Diâmetro de poste e cintas",cabos:"Dados técnicos de cabos"};
 function initials(n){ return (n||"?").split(/\s+/).slice(0,2).map(function(w){return w[0];}).join("").toUpperCase(); }
 
 /* ==========================================================================
@@ -81,7 +102,7 @@ function storePrevia(DB){
     fornecedores:"catalog/fornecedores", fabricantes:"catalog/fabricantes", unidades:"catalog/unidades",
     servicos:"catalog/servicos", normas:"normativas/normas", padroes:"normativas/padroes",
     especificacoes:"normativas/especificacoes", fornecedores_aprovados:"normativas/fornecedores_aprovados",
-    ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos" };
+    anexo1:"normativas/anexo1", ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos" };
   var usuariosCache = [];
   return {
     tipo:"previa",
@@ -149,6 +170,46 @@ async function criarStore(){
   return storeApi();
 }
 
+/* ---------- formatação ---------- */
+var MINUSCULAS=["de","da","do","das","dos","e","em","no","na","nos","nas","a","o","as","os","ao","aos",
+  "à","às","para","com","por","sob","sobre","entre","sem","um","uma"];
+function titulo(s){
+  if(!s) return s;
+  var partes=String(s).toLowerCase().trim().split(/\s+/);
+  return partes.map(function(p,i){
+    if(i>0&&MINUSCULAS.indexOf(p)>=0) return p;
+    return p.replace(/^([a-zà-ÿ])/,function(c){ return c.toUpperCase(); })
+            .replace(/([-'\u2019])([a-zà-ÿ])/g,function(_,s2,c){ return s2+c.toUpperCase(); });
+  }).join(" ");
+}
+function mascara(valor,molde){
+  var d=digitos(valor), fora=0, out="";
+  for(var i=0;i<molde.length&&fora<d.length;i++){
+    if(molde[i]==="0"){ out+=d[fora++]; } else { out+=molde[i]; }
+  }
+  return out;
+}
+var FORMATO={
+  titulo:titulo,
+  maiuscula:function(v){ return (v||"").toUpperCase().trim(); },
+  minuscula:function(v){ return (v||"").toLowerCase().trim(); },
+  cnpj:function(v){ return mascara(v,"00.000.000/0000-00"); },
+  cpf:function(v){ return mascara(v,"000.000.000-00"); },
+  cep:function(v){ return mascara(v,"00000-000"); },
+  telefone:function(v){ var d=digitos(v);
+    return d.length>10?mascara(v,"(00) 00000-0000"):mascara(v,"(00) 0000-0000"); },
+  ie:function(v,obra){
+    var uf=(obra&&(obra.ufEmp||obra.uf||obra.ufCli))||"";
+    if(uf==="RS") return mascara(v,"000/0000000");
+    return mascara(v,"000.000.000.000");
+  }
+};
+function aplicarFormato(campo,valor,obra){
+  if(!campo.fmt||valor===""||valor===null||valor===undefined) return valor;
+  var f=FORMATO[campo.fmt];
+  return f?f(valor,obra):valor;
+}
+
 /* ---------- validadores ---------- */
 function digitos(s){ return (s||"").replace(/\D/g,""); }
 function okCNPJ(v){ var c=digitos(v); if(c.length!==14||/^(\d)\1+$/.test(c)) return false;
@@ -171,33 +232,33 @@ function okEmail(v){ return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v||""); }
    ========================================================================== */
 var FD=[
  {id:"cliente",titulo:"Dados do cliente",campos:[
-  {k:"cliente",l:"Cliente",req:1,w:3},
-  {k:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
+  {k:"cliente",fmt:"titulo",l:"Cliente",req:1,w:3},
+  {k:"cnpj",fmt:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
   {k:"codigoObra",l:"Código da obra",w:1},
-  {k:"rua",l:"Rua",req:1,w:3},{k:"numero",l:"Nº",req:1,w:1},{k:"bairro",l:"Bairro",req:1,w:2},
+  {k:"rua",fmt:"titulo",l:"Rua",req:1,w:3},{k:"numero",l:"Nº",req:1,w:1},{k:"bairro",fmt:"titulo",l:"Bairro",req:1,w:2},
   {k:"municipioCli",l:"Município",req:1,w:3,tipo:"municipio"},
-  {k:"ufCli",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
-  {k:"cepCli",l:"CEP",req:1,w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
-  {k:"emailNfe",l:"E-mail para envio de NF-e",req:1,w:3,val:okEmail,msg:"E-mail inválido"},
-  {k:"respConcess",l:"Responsável pelo cliente junto à concessionária",req:1,w:3},
-  {k:"cpfResp",l:"CPF do responsável",req:1,w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"rep1",l:"Representante legal 1",req:1,w:2},{k:"nac1",l:"Nacionalidade",w:2},
+  {k:"ufCli",fmt:"maiuscula",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
+  {k:"cepCli",fmt:"cep",l:"CEP",req:1,w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
+  {k:"emailNfe",fmt:"minuscula",l:"E-mail para envio de NF-e",req:1,w:3,val:okEmail,msg:"E-mail inválido"},
+  {k:"respConcess",fmt:"titulo",l:"Responsável pelo cliente junto à concessionária",req:1,w:3},
+  {k:"cpfResp",fmt:"cpf",l:"CPF do responsável",req:1,w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"rep1",fmt:"titulo",l:"Representante legal 1",req:1,w:2},{k:"nac1",fmt:"titulo",l:"Nacionalidade",w:2},
   {k:"ec1",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"]},
-  {k:"rg1",l:"RG",w:2},{k:"cpf1",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"rep2",l:"Representante legal 2",w:2},{k:"nac2",l:"Nacionalidade",w:2},
+  {k:"rg1",l:"RG",w:2},{k:"cpf1",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"rep2",fmt:"titulo",l:"Representante legal 2",w:2},{k:"nac2",fmt:"titulo",l:"Nacionalidade",w:2},
   {k:"ec2",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"]},
-  {k:"rg2",l:"RG",w:2},{k:"cpf2",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"testCli",l:"Testemunha da contratante",w:2},{k:"rgTestCli",l:"RG",w:2},
-  {k:"cpfTestCli",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"}
+  {k:"rg2",l:"RG",w:2},{k:"cpf2",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"testCli",fmt:"titulo",l:"Testemunha da contratante",w:2},{k:"rgTestCli",l:"RG",w:2},
+  {k:"cpfTestCli",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"}
  ]},
  {id:"obra",titulo:"Dados da obra",campos:[
-  {k:"empreendimento",l:"Nome do empreendimento",req:1,w:4},
+  {k:"empreendimento",fmt:"titulo",l:"Nome do empreendimento",req:1,w:4},
   {k:"dataEnergizacao",l:"Data prevista para energização",req:1,w:2,tipo:"date"},
   {k:"municipio",l:"Município da obra",req:1,w:3,tipo:"municipio",
    nota:"Define a concessionária, as constantes A e B, a tensão primária e a classe de tensão."},
-  {k:"uf",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
-  {k:"bairroObra",l:"Bairro",req:1,w:2},
-  {k:"cepObra",l:"CEP",req:1,w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
+  {k:"uf",fmt:"maiuscula",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
+  {k:"bairroObra",fmt:"titulo",l:"Bairro",req:1,w:2},
+  {k:"cepObra",fmt:"cep",l:"CEP",req:1,w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
   {k:"tipoEmpreendimento",l:"Tipo de empreendimento",req:1,w:2,tipo:"select",ops:["Loteamento","Núcleo habitacional"]},
   {k:"respIP",l:"Responsável pelo consumo da iluminação pública",req:1,w:2,tipo:"select",ops:["Prefeitura","Condomínio","Cliente"]},
   {k:"oficioPrefeitura",l:"Já existe ofício da prefeitura?",w:2,tipo:"select",ops:["Sim","Não"],
@@ -205,23 +266,24 @@ var FD=[
  ]},
  {id:"projeto",titulo:"Dados do projeto",campos:[
   {k:"concessionaria",l:"Concessionária",w:2,ro:1,drv:"Preenchida pelo município da obra"},
-  {k:"regional",l:"Regional",req:1,w:2},
+  {k:"regional",fmt:"titulo",l:"Regional",req:1,w:2},
   {k:"tipoProjeto",l:"Tipo de projeto",req:1,w:6,tipo:"select",ops:[
     "Rede de distribuição aérea primária e secundária com iluminação pública",
     "Rede de distribuição aérea primária e secundária sem iluminação pública",
     "Rede de distribuição subterrânea",
     "Somente cálculo de esforço mecânico",
     "Cálculo de esforço mecânico + lista de materiais"]},
-  {k:"gedKvas",l:"Tabela para cálculo do kVA",req:1,w:3,tipo:"select",ops:["GED 3738 REV. 09/11/23 PG.07/08"]},
+  {k:"gedKvas",l:"Tabela para cálculo do kVA",req:1,w:3,tipo:"select",
+   ops:["Anexo 1 — Previsão de consumo (kWh) por tipo de empreendimento"]},
   {k:"caboPrimario",l:"Cabo principal da rede primária",req:1,w:2,tipo:"select",ops:["E70","E50","E35","CA 1/0","CA 4/0"]},
   {k:"vaoBasico",l:"Vão básico entre postes (m)",req:1,w:1,tipo:"number",min:20,max:60,
    val:function(v){return v>=20&&v<=60;},msg:"Entre 20 e 60 m"},
   {k:"lotesT1",l:"Tamanho médio dos lotes tipo 1 (m²)",req:1,w:2,tipo:"number",min:1},
-  {k:"atividadeT1",l:"Atividade do consumidor tipo 1",req:1,w:2,tipo:"atividade"},
+  {k:"atividadeT1",l:"Tipo de empreendimento do consumidor tipo 1",req:1,w:2,tipo:"atividade"},
   {k:"ligacaoT1",l:"Ligação do consumidor tipo 1",req:1,w:1,tipo:"ligacao"},
   {k:"qtdT1",l:"Quantidade de consumidores tipo 1",req:1,w:1,tipo:"number",min:1},
   {k:"lotesT2",l:"Tamanho médio dos lotes tipo 2 (m²)",w:2,tipo:"number",reqSe:function(o){return Number(o.qtdT2)>0;}},
-  {k:"atividadeT2",l:"Atividade do consumidor tipo 2",w:2,tipo:"atividade",reqSe:function(o){return Number(o.qtdT2)>0;}},
+  {k:"atividadeT2",l:"Tipo de empreendimento do consumidor tipo 2",w:2,tipo:"atividade",reqSe:function(o){return Number(o.qtdT2)>0;}},
   {k:"ligacaoT2",l:"Ligação do consumidor tipo 2",w:1,tipo:"ligacao",reqSe:function(o){return Number(o.qtdT2)>0;}},
   {k:"qtdT2",l:"Quantidade de consumidores tipo 2",w:1,tipo:"number",min:0,
    nota:"Deixe zero quando não houver segundo tipo de consumidor."},
@@ -229,7 +291,7 @@ var FD=[
    nota:"Quantificar e descrever cada tipo. Deixar em branco se não houver."},
   {k:"luminaria",l:"Luminária mais utilizada",req:1,w:3,tipo:"select",
    ops:["LED 100 W","LED 150 W","LED 250 W","Vapor de sódio 100 W","Vapor de sódio 150 W","Vapor de sódio 250 W","Vapor de sódio 400 W"]},
-  {k:"respProjeto",l:"Responsabilidade do projeto",w:3},
+  {k:"respProjeto",fmt:"titulo",l:"Responsabilidade do projeto",w:3},
   {k:"numeroProjeto",l:"Número do projeto",w:2},{k:"trt",l:"TRT",w:2},
   {k:"refEletricas",l:"Referências elétricas",w:2},{k:"numAtividade",l:"Número da atividade",w:2},
   {k:"viabilidade",l:"Viabilidade aprovada em",w:2,tipo:"date"},
@@ -239,23 +301,23 @@ var FD=[
   {k:"impressao",l:"Impressão",w:2,tipo:"select",ops:["Folha timbrada","Folha sem timbre"]}
  ]},
  {id:"empreiteira",titulo:"Dados da empreiteira",campos:[
-  {k:"empreiteira",l:"Empreiteira",req:1,w:3},
-  {k:"cnpjEmp",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
-  {k:"cftEmp",l:"CFT",w:1},{k:"ieEmp",l:"Inscrição estadual",w:2},
-  {k:"ruaEmp",l:"Rua",w:3},{k:"numEmp",l:"Nº",w:1},
-  {k:"bairroEmp",l:"Bairro",w:2},{k:"munEmp",l:"Município",w:3,tipo:"municipio"},
-  {k:"ufEmp",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
-  {k:"cepEmp",l:"CEP",w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
-  {k:"contatoEmp",l:"Contato",w:2},{k:"cpfContato",l:"CPF do contato",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"telEmp",l:"Telefone(s)",w:2},
-  {k:"emailEmp",l:"E-mail para contato",w:3,val:okEmail,msg:"E-mail inválido"},
-  {k:"responsavelEmp",l:"Responsável",w:3},{k:"nacEmp",l:"Nacionalidade",w:2},
+  {k:"empreiteira",fmt:"titulo",l:"Empreiteira",req:1,w:3},
+  {k:"cnpjEmp",fmt:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
+  {k:"cftEmp",l:"CFT",w:1},{k:"ieEmp",fmt:"ie",l:"Inscrição estadual",w:2},
+  {k:"ruaEmp",fmt:"titulo",l:"Rua",w:3},{k:"numEmp",l:"Nº",w:1},
+  {k:"bairroEmp",fmt:"titulo",l:"Bairro",w:2},{k:"munEmp",l:"Município",w:3,tipo:"municipio"},
+  {k:"ufEmp",fmt:"maiuscula",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
+  {k:"cepEmp",fmt:"cep",l:"CEP",w:2,val:okCEP,msg:"CEP deve ter 8 dígitos"},
+  {k:"contatoEmp",fmt:"titulo",l:"Contato",w:2},{k:"cpfContato",fmt:"cpf",l:"CPF do contato",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"telEmp",fmt:"telefone",l:"Telefone(s)",w:2},
+  {k:"emailEmp",fmt:"minuscula",l:"E-mail para contato",w:3,val:okEmail,msg:"E-mail inválido"},
+  {k:"responsavelEmp",fmt:"titulo",l:"Responsável",w:3},{k:"nacEmp",fmt:"titulo",l:"Nacionalidade",w:2},
   {k:"ecEmp",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"]},
   {k:"rgEmp",l:"RG",w:1},{k:"orgaoEmp",l:"Órgão expedidor",w:1},
-  {k:"cpfEmp",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"testEmp",l:"Testemunha da contratada",w:2},{k:"rgTestEmp",l:"RG",w:2},
-  {k:"cpfTestEmp",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"respTecnico",l:"Responsável técnico",req:1,w:3},{k:"cftRT",l:"CFT do responsável técnico",w:2}
+  {k:"cpfEmp",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"testEmp",fmt:"titulo",l:"Testemunha da contratada",w:2},{k:"rgTestEmp",l:"RG",w:2},
+  {k:"cpfTestEmp",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"respTecnico",fmt:"titulo",l:"Responsável técnico",req:1,w:3},{k:"cftRT",l:"CFT do responsável técnico",w:2}
  ]},
  {id:"parametros",titulo:"Parâmetros de cálculo",campos:[
   {k:"qtMaxSec",l:"Queda de tensão máxima na rede secundária (%)",req:1,w:2,tipo:"number",step:"0.1",
@@ -280,6 +342,23 @@ function validarObra(o){
     if(!vazio&&c.val&&!c.val(c.tipo==="number"?Number(v):v))
       errs.push({sec:s.id,secT:s.titulo,k:c.k,l:c.l,tipo:"formato",msg:c.msg||"Valor inválido"});
   });});
+  [["T1","lotesT1","atividadeT1","ligacaoT1","tipo 1"],["T2","lotesT2","atividadeT2","ligacaoT2","tipo 2"]].forEach(function(t){
+    var ativ=o[t[2]], lig=o[t[3]], lote=Number(o[t[1]]);
+    if(t[0]==="T2"&&!(Number(o.qtdT2)>0)) return;
+    if(!ativ||!lig) return;
+    if(consumoAnexo1(ativ,lig)===null)
+      errs.push({sec:"projeto",secT:"Dados do projeto",k:t[3],l:"Ligação do consumidor "+t[4],tipo:"formato",
+        msg:"O Anexo 1 não prevê "+nomeLigacao(lig).toLowerCase()+" para esse tipo de empreendimento"});
+    var def=tipoAnexo1(ativ);
+    if(def&&def.faixa&&lote>0){
+      if(def.faixa==="ate500"&&lote>500)
+        errs.push({sec:"projeto",secT:"Dados do projeto",k:t[1],l:"Tamanho médio dos lotes "+t[4],tipo:"coerencia",
+          msg:"Lote de "+num(lote)+" m² com faixa de até 500 m² selecionada"});
+      if(def.faixa==="acima500"&&lote<=500)
+        errs.push({sec:"projeto",secT:"Dados do projeto",k:t[1],l:"Tamanho médio dos lotes "+t[4],tipo:"coerencia",
+          msg:"Lote de "+num(lote)+" m² com faixa acima de 500 m² selecionada"});
+    }
+  });
   if(Number(o.qtdT1)>0&&Number(o.lotesT1)>0&&Number(o.lotesT1)<50)
     errs.push({sec:"projeto",secT:"Dados do projeto",k:"lotesT1",l:"Tamanho médio dos lotes tipo 1",
       tipo:"coerencia",msg:"Lote menor que 50 m² — confirmar com o responsável técnico"});
@@ -289,7 +368,44 @@ function validarObra(o){
   return errs;
 }
 function totalCampos(){ var n=0; FD.forEach(function(s){ n+=s.campos.length; }); return n; }
-function municipioInfo(nome){ var l=items("municipios"); for(var i=0;i<l.length;i++) if(l[i].municipio===nome) return l[i]; return null; }
+// A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.
+function cintaPara(diametro){ return Math.ceil((diametro-5)/10)*10; }
+function recalcularBitola(r){
+  var altura=Number(r.altura)||0, topo=Number(r.diamTopo)||0, base=Number(r.diamBase)||0;
+  r.conicidade = altura>0 ? Number(((base-topo)/(altura*1000)).toFixed(5)) : 0;
+  r.maxDist = altura*1000;
+  var faixas=[], atual=null;
+  for(var d=0; d<=altura*1000; d+=10){
+    var dia=topo+d*r.conicidade, c=cintaPara(dia);
+    if(!atual||atual.cinta!==c){ atual={cinta:c,de:Number(dia.toFixed(1)),ate:Number(dia.toFixed(1))}; faixas.push(atual); }
+    else atual.ate=Number(dia.toFixed(1));
+  }
+  r.faixas=faixas;
+  return r;
+}
+function anexo1Tipos(){ return items("anexo1"); }
+function anexo1Ligacoes(){ return (S.cat.anexo1&&S.cat.anexo1.ligacoes)||[]; }
+function tipoAnexo1(nome){ var r=null; anexo1Tipos().forEach(function(x){ if(x.tipo===nome) r=x; }); return r; }
+// Consumo estimado em kWh/mês. Sem valor quando a combinação não existe no Anexo 1.
+function consumoAnexo1(tipo,ligacao){
+  var t=tipoAnexo1(tipo);
+  if(!t||!ligacao) return null;
+  var v=t.consumo[ligacao];
+  return (v===undefined)?null:v;
+}
+function nomeLigacao(cod){ var n=cod; anexo1Ligacoes().forEach(function(l){ if(l.codigo===cod) n=l.nome; }); return n; }
+function contarMunicipios(nome){ var n=0; items("municipios").forEach(function(m){ if(m.concessionaria===nome) n++; }); return n; }
+function concessionariaInfo(nome){ var l=items("concessionarias"); for(var i=0;i<l.length;i++) if(l[i].nome===nome) return l[i]; return null; }
+// As constantes A e B pertencem à concessionária. O município só aponta para ela.
+function constantesDe(municipio){
+  var c=municipio&&concessionariaInfo(municipio.concessionaria);
+  return c?{constA:c.constA,constB:c.constB}:{constA:null,constB:null};
+}
+function municipioInfo(nome){
+  var l=items("municipios");
+  for(var i=0;i<l.length;i++) if(l[i].municipio===nome) return Object.assign({},l[i],constantesDe(l[i]));
+  return null;
+}
 
 /* ==========================================================================
    CARGA
@@ -392,8 +508,9 @@ var MENU=[
    {r:"fabricantes",l:"Fabricantes",c:"fabricantes"},
    {r:"unidades",l:"Unidades",c:"unidades"}]},
  {grp:"Tabelas normativas",itens:[
+   {r:"anexo1",l:"Anexo 1 — consumo",c:"anexo1"},
    {r:"ged",l:"GED aplicável",c:"ged"},
-   {r:"ged3738",l:"GED 3738 — consumo",c:"ged3738"},
+   {r:"ged3738",l:"GED 3738 (anterior)",c:"ged3738"},
    {r:"normas",l:"Normas técnicas",c:"normas"},
    {r:"padroes",l:"Padrões de instalação",c:"padroes"},
    {r:"especificacoes",l:"Especificações técnicas",c:"especificacoes"},
@@ -518,6 +635,7 @@ async function salvarFolha(){
   if(!S.rascunho||S.salvando) return true;
   S.salvando=true;
   try{
+    S.rascunho.revisoes=revisoesAtuais();
     await Store.salvarObra(S.rascunho);
     var i=-1; S.obras.forEach(function(x,k){ if(x._id===S.rascunho._id) i=k; });
     S.rascunho.atualizadoEm=new Date().toISOString();
@@ -537,11 +655,10 @@ async function salvarFolha(){
 }
 function confirmarSaida(depois){
   if(!folhaAlterada()) { fecharFolha(); depois(); return; }
-  modal("Alterações não salvas",
+  var bg=modal("Alterações não salvas",
     "<p>Esta obra tem alterações que ainda não foram gravadas.</p>",
-    async function(){ if(await salvarFolha()){ fecharFolha(); depois(); } else return false; },
+    async function(){ if(await salvarFolha()){ fecharFolha(); depois(); return true; } return false; },
     "Salvar e sair");
-  var bg=document.querySelector(".modal-bg:last-of-type");
   var rodape=bg.querySelector(".modal-f");
   var descartar=el('<button class="btn danger">Sair sem salvar</button>');
   descartar.addEventListener("click",function(){ bg.remove(); fecharFolha(); depois(); });
@@ -554,13 +671,16 @@ function viewObras(){
   if(!S.obras.length) return h+'<div class="panel"><div class="empty"><h4>Nenhuma obra cadastrada</h4>'+
     "<p>A folha de dados confere os campos obrigatórios enquanto você digita e aponta o que falta antes do cálculo.</p></div></div>";
   h+='<div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Empreendimento</th><th>Cliente</th><th>Município</th>'+
-    "<th>Concessionária</th><th>Energização</th><th>Consistência</th><th>Atualizada</th><th></th></tr></thead><tbody>";
+    "<th>Concessionária</th><th>Energização</th><th>Consistência</th><th>Base normativa</th><th>Atualizada</th><th></th></tr></thead><tbody>";
   S.obras.slice().sort(function(a,b){ return (b.atualizadoEm||"").localeCompare(a.atualizadoEm||""); }).forEach(function(o){
     var e=validarObra(o), pr=Math.round((1-e.length/totalCampos())*100);
     h+="<tr><td><strong>"+esc(o.empreendimento||"(sem nome)")+"</strong></td><td>"+esc(o.cliente||"—")+"</td><td>"+
       esc(o.municipio||"—")+"</td><td>"+esc(o.concessionaria||"—")+'</td><td class="num">'+
       (o.dataEnergizacao?esc(o.dataEnergizacao.split("-").reverse().join("/")):"—")+"</td><td>"+
       (e.length?'<span class="chip bad">'+e.length+" pendente"+(e.length>1?"s":"")+"</span>":'<span class="chip ok">completa '+pr+"%</span>")+
+      "</td><td>"+(function(){ var f=revisoesDefasadas(o);
+        if(!o.revisoes) return '<span class="pill">não carimbada</span>';
+        return f.length?'<span class="chip warn">'+f.length+" desatualizada"+(f.length>1?"s":"")+"</span>":'<span class="chip ok">em dia</span>'; })()+
       '</td><td class="num" style="color:var(--muted);font-size:12px">'+fmtDT(o.atualizadoEm)+
       '</td><td style="text-align:right;white-space:nowrap"><button class="btn ghost sm" data-obra="'+esc(o._id)+'">Abrir</button>'+
       (can("obra.edit")?' <button class="btn danger sm" data-del-obra="'+esc(o._id)+'">Excluir</button>':"")+"</td></tr>";
@@ -576,15 +696,14 @@ function campoHTML(c,o,errs){
   var inner;
   if(c.tipo==="select"||c.tipo==="municipio"||c.tipo==="atividade"||c.tipo==="ligacao"){
     var ops=[];
-    if(c.tipo==="municipio") ops=items("municipios").map(function(m){ return m.municipio+" / "+m.uf; });
-    else if(c.tipo==="atividade") ops=items("ged3738").map(function(a){ return a.atividade; });
-    else if(c.tipo==="ligacao"){ var lg=(S.cat.ged3738&&S.cat.ged3738.ligacoes)||[];
-      ops=lg.map(function(l){ return l.codigo+" · "+(l.fases||"").toLowerCase()+" "+(l.tensao||"")+" · renda "+(l.renda||""); }); }
-    else ops=c.ops||[];
+    var pares=[];
+    if(c.tipo==="municipio") pares=items("municipios").map(function(m){ return [m.municipio, m.municipio+" / "+m.uf]; });
+    else if(c.tipo==="atividade") pares=anexo1Tipos().map(function(a){ return [a.tipo, a.tipo]; });
+    else if(c.tipo==="ligacao") pares=anexo1Ligacoes().map(function(l){ return [l.codigo, l.nome]; });
+    else pares=(c.ops||[]).map(function(x){ return [x,x]; });
     inner='<select data-k="'+c.k+'"'+dis+'><option value="">—</option>'+
-      ops.map(function(op){
-        var val=(c.tipo==="municipio")?op.split(" / ")[0]:((c.tipo==="ligacao")?op.split(" · ")[0]:op);
-        return '<option value="'+esc(val)+'"'+(String(v)===val?" selected":"")+">"+esc(op)+"</option>"; }).join("")+"</select>";
+      pares.map(function(par){
+        return '<option value="'+esc(par[0])+'"'+(String(v)===par[0]?" selected":"")+">"+esc(par[1])+"</option>"; }).join("")+"</select>";
   } else if(c.tipo==="textarea"){
     inner='<textarea data-k="'+c.k+'" rows="2"'+dis+">"+esc(v)+"</textarea>";
   } else {
@@ -626,6 +745,17 @@ function viewFolha(){
       "Todos os campos obrigatórios estão preenchidos e nos formatos esperados.")+"</div></div>"+
     '<div class="bar"><i style="width:'+pct+'%"></i></div><span class="mono" style="font-size:12px">'+pct+"%</span></div>";
 
+  var fora=revisoesDefasadas(o);
+  if(fora.length){
+    h+='<div class="panel aviso-rev" style="margin-bottom:14px"><div class="panel-h"><div>'+
+      "<h3>Base normativa desatualizada</h3>"+
+      '<p class="sub">Esta obra foi gravada sobre revisões que deixaram de ser as vigentes. Confira se o cálculo precisa ser refeito.</p></div></div>'+
+      '<div class="tbl-wrap"><table><thead><tr><th>Tabela</th><th>Revisão usada na obra</th><th>Revisão vigente</th></tr></thead><tbody>'+
+      fora.map(function(f){ return "<tr><td>"+esc(NOME_TABELA[f.chave]||f.chave)+'</td><td class="mono">'+esc(f.usada)+
+        '</td><td class="mono" style="color:var(--warn)">'+esc(f.atual)+"</td></tr>"; }).join("")+
+      "</tbody></table></div></div>";
+  }
+
   if(errs.length){
     h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h3>Pendências</h3></div>'+
       '<div class="panel-b" style="display:flex;flex-wrap:wrap;gap:7px">'+
@@ -644,6 +774,24 @@ function viewFolha(){
         '</div><div class="mono" style="font-size:14px;margin-top:2px">'+esc(r[1]===null||r[1]===undefined?"—":r[1])+"</div></div>"; }).join("")+
       "</div></div>";
   }
+  var c1=consumoAnexo1(o.atividadeT1,o.ligacaoT1), c2=consumoAnexo1(o.atividadeT2,o.ligacaoT2);
+  if(o.atividadeT1||o.atividadeT2){
+    var linhas=[["Consumidor tipo 1",o.atividadeT1,o.ligacaoT1,c1,Number(o.qtdT1)||0],
+                ["Consumidor tipo 2",o.atividadeT2,o.ligacaoT2,c2,Number(o.qtdT2)||0]]
+               .filter(function(l){ return l[1]; });
+    var total=linhas.reduce(function(s,l){ return s+((l[3]||0)*l[4]); },0);
+    h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Consumo estimado</h3>'+
+      '<p class="sub">'+esc(rotuloRevisao("anexo1")==="não informada"?"Anexo 1 — revisão não informada":"Anexo 1 · "+rotuloRevisao("anexo1"))+
+      '</p></div></div><div class="tbl-wrap"><table><thead><tr><th>Consumidor</th><th>Tipo de empreendimento</th>'+
+      '<th>Ligação</th><th class="num">kWh/mês</th><th class="num">Qtd.</th><th class="num">Total kWh/mês</th></tr></thead><tbody>'+
+      linhas.map(function(l){
+        return "<tr><td>"+esc(l[0])+"</td><td>"+esc(l[1])+"</td><td>"+esc(l[2]?nomeLigacao(l[2]):"—")+
+          '</td><td class="num">'+(l[3]===null?'<span class="chip bad">não previsto</span>':num(l[3]))+
+          '</td><td class="num">'+num(l[4])+'</td><td class="num">'+(l[3]===null?"—":num(l[3]*l[4]))+"</td></tr>"; }).join("")+
+      (total?'<tr><td colspan="5" style="text-align:right"><strong>Total</strong></td><td class="num"><strong>'+num(total)+"</strong></td></tr>":"")+
+      "</tbody></table></div></div>";
+  }
+
   FD.forEach(function(s,i){
     var se=errs.filter(function(e){ return e.sec===s.id; }).length;
     h+='<div class="sect" data-sect="'+s.id+'"><div class="sect-h"><h4><span class="idx">'+String(i+1).padStart(2,"0")+"</span>"+
@@ -657,31 +805,42 @@ function viewFolha(){
    CADASTROS E TABELAS
    ========================================================================== */
 var TAB={
- concessionarias:{cat:"concessionarias",t:"Concessionárias",d:"Vinculadas aos municípios, materiais e projetos. Cada concessionária carrega a GED vigente.",
-   cols:[["nome","Concessionária"],["grupo","Grupo"],["ufs","UF",function(v){return (v||[]).join(", ");}],
-         ["municipios","Municípios",null,1],["classesTensao","Classes de tensão",function(v){return (v||[]).join(" / ")+" kV";}],
-         ["gedVigente","GED vigente"]],
-   busca:["nome","grupo"],perm:"cad",novo:{nome:"",grupo:"",ufs:[],municipios:0,classesTensao:[],gedVigente:"",ativo:true},
-   form:[["nome","Concessionária"],["grupo","Grupo"],["gedVigente","GED vigente"]]},
- municipios:{cat:"municipios",t:"Municípios e constantes",d:"Constantes A e B, tensões e concessionária por município, usadas no cálculo de demanda.",
+ concessionarias:{cat:"concessionarias",t:"Concessionárias",
+   d:"As constantes A e B pertencem à concessionária. Alterar aqui vale na hora para todos os municípios dela.",
+   cols:[["nome","Concessionária"],["constA","Constante A",function(v){return num(v,4);},1],
+         ["constB","Constante B",function(v){return num(v,4);},1],
+         ["ufs","UF",function(v){return (v||[]).join(", ");}],
+         ["municipios","Municípios",function(v,r){ return num(contarMunicipios(r.nome)); },1],
+         ["classesTensao","Classes de tensão",function(v){return (v||[]).join(" / ")+" kV";}],
+         ["gedVigente","GED vigente"],
+         ["absorveu","Absorveu",function(v){ return (v&&v.length)?v.map(function(x){ return '<span class="pill" style="margin-right:3px">'+esc(x)+"</span>"; }).join(""):"—"; }]],
+   busca:["nome","grupo"],perm:"cad",
+   novo:{nome:"",grupo:"CPFL Energia",constA:null,constB:null,ufs:[],classesTensao:[],gedVigente:"",absorveu:[],ativo:true},
+   form:[["nome","Concessionária"],["grupo","Grupo"],["constA","Constante A","number"],["constB","Constante B","number"],["gedVigente","GED vigente"]]},
+ municipios:{cat:"municipios",t:"Municípios e constantes",
+   d:"Tensões e concessionária por município. As constantes A e B vêm da concessionária e são editadas lá.",
    cols:[["municipio","Município"],["uf","UF"],["concessionaria","Concessionária"],
-         ["constA","Constante A",function(v){return num(v,4);},1],["constB","Constante B",function(v){return num(v,4);},1],
+         ["constA","Constante A",function(v,r){ return '<span class="derivado">'+num(constantesDe(r).constA,4)+"</span>"; },1],
+         ["constB","Constante B",function(v,r){ return '<span class="derivado">'+num(constantesDe(r).constB,4)+"</span>"; },1],
          ["tensaoPrimNominal","Tensão prim. (kV)",function(v){return num(v,1);},1],
          ["classe15_25","Classe (kV)",function(v){return num(v,0);},1],
-         ["tensaoSecFF","Tensão sec. (V)",function(v,r){return num(v,0)+" / "+num(r.tensaoSecFN,0);},1]],
+         ["tensaoSecFF","Tensão sec. (V)",function(v,r){return num(v,0)+" / "+num(r.tensaoSecFN,0);},1],
+         ["concessionariaAnterior","Era",function(v){ return v?'<span class="pill">'+esc(v)+"</span>":"—"; }]],
    busca:["municipio","uf","concessionaria"],perm:"cad",
-   novo:{municipio:"",uf:"",concessionaria:"",constA:null,constB:null,tensaoPrimNominal:null,classe15_25:null,tensaoSecFF:null,tensaoSecFN:null},
-   form:[["municipio","Município"],["uf","UF"],["concessionaria","Concessionária"],["constA","Constante A","number"],
-         ["constB","Constante B","number"],["tensaoPrimNominal","Tensão primária nominal (kV)","number"],
+   novo:{municipio:"",uf:"",concessionaria:"",tensaoPrimNominal:null,classe15_25:null,tensaoSecFF:null,tensaoSecFN:null},
+   form:[["municipio","Município"],["uf","UF"],["concessionaria","Concessionária"],
+         ["tensaoPrimNominal","Tensão primária nominal (kV)","number"],
          ["classe15_25","Classe de tensão (kV)","number"],["tensaoSecFF","Tensão secundária fase-fase (V)","number"],
          ["tensaoSecFN","Tensão secundária fase-neutro (V)","number"]]},
  materiais:{cat:"materiais",t:"Materiais",d:"Cadastro próprio, independente dos projetos. O preço unitário entra com a tabela vigente.",
-   cols:[["descricao","Descrição"],["grupo","Classe"],["unidade","Un."],["fabricante","Fabricante"],["fornecedor","Fornecedor"],
+   cols:[["codigo","Código",function(v){ return v?'<span class="mono">'+esc(v)+"</span>":'<span class="pill">sem código</span>'; }],
+         ["descricao","Descrição"],["grupo","Classe"],["unidade","Un."],["fabricante","Fabricante"],["fornecedor","Fornecedor"],
          ["ged","GED"],["precoUnitario","Preço unitário",function(v){ return v===null||v===undefined?'<span class="pill">pendente</span>':num(v,2); },1]],
-   busca:["descricao","grupo","fabricante","fornecedor","ged"],perm:"cad",
-   novo:{descricao:"",grupo:"DIVERSOS",unidade:"pç",fabricante:"",fornecedor:"",ged:"",precoUnitario:null},
-   form:[["descricao","Descrição"],["grupo","Classe"],["unidade","Unidade"],["fabricante","Fabricante"],
-         ["fornecedor","Fornecedor"],["ged","GED"],["precoUnitario","Preço unitário (R$)","number"]]},
+   busca:["codigo","descricao","grupo","fabricante","fornecedor","ged"],perm:"cad",
+   novo:{codigo:"",descricao:"",grupo:"DIVERSOS",unidade:"pç",fabricante:"",fornecedor:"",ged:"",precoUnitario:null},
+   form:[["codigo","Código (até 10 caracteres)","text",10],["descricao","Descrição"],["grupo","Classe"],
+         ["unidade","Unidade"],["fabricante","Fabricante"],["fornecedor","Fornecedor"],["ged","GED"],
+         ["precoUnitario","Preço unitário (R$)","number"]]},
  servicos:{cat:"servicos",t:"Serviços",d:"Serviços com código, descrição, unidade e preço unitário.",
    cols:[["codigo","Código"],["descricao","Descrição"],["unidade","Un."],["classe","Classe"],
          ["precoUnitario","Preço unitário",function(v){ return v===null||v===undefined?'<span class="pill">pendente</span>':num(v,2); },1]],
@@ -712,9 +871,49 @@ var TAB={
    novo:{tipo:"GED",numero:"",descricao:""},form:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]]},
  aprovados:{cat:"fornecedores_aprovados",t:"Fornecedores aprovados",d:"Documentos que definem fabricantes e fornecedores homologados.",
    cols:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]],busca:["numero","descricao"],perm:"norm",
-   novo:{tipo:"GED",numero:"",descricao:""},form:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]]}
+   novo:{tipo:"GED",numero:"",descricao:""},form:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]]},
+ cintas:{cat:"cintas",t:"Diâmetro de poste e cintas",d:"Parâmetros de cada bitola de poste. A conicidade e as faixas de cinta são recalculadas a cada gravação.",
+   cols:[["bitola","Bitola"],["altura","Altura (m)",function(v){return num(v,1);},1],["carga","Carga (daN)",null,1],
+         ["diamTopo","Ø topo (mm)",function(v){return num(v,0);},1],["diamBase","Ø base (mm)",function(v){return num(v,0);},1],
+         ["conicidade","Conicidade (mm/mm)",function(v){return num(v,5);},1],
+         ["distanciaTopo","Dist. do topo (mm)",function(v){return num(v,0);},1],
+         ["faixas","Cintas",function(v){ return (v||[]).map(function(f){ return '<span class="pill" style="margin-right:4px">Ø'+f.cinta+"</span>"; }).join(""); }]],
+   busca:["bitola","carga"],perm:"norm",derivar:recalcularBitola,
+   novo:{bitola:"",altura:9,carga:"",diamTopo:null,diamBase:null,distanciaTopo:10},
+   form:[["bitola","Bitola (ex.: 9/300)"],["altura","Altura (m)","number"],["carga","Carga nominal (daN)"],
+         ["diamTopo","Diâmetro do topo (mm)","number"],["diamBase","Diâmetro da base (mm)","number"],
+         ["distanciaTopo","Distância a partir do topo (mm)","number"]]}
 };
 
+function barraRevisao(chave){
+  var r=revisaoDe(chave);
+  var pode=can("norm.edit")&&TABELAS_NORMATIVAS.indexOf(chave)>=0;
+  return '<div class="revbar'+(r&&r.versao?"":" vazia")+'">'+
+    '<div><strong>Revisão vigente:</strong> '+esc(rotuloRevisao(chave))+
+    (r&&r.atualizadoEm?' <span class="note">· informada por '+esc(r.atualizadoPor||"—")+" em "+fmtDT(r.atualizadoEm)+"</span>":"")+
+    "</div>"+
+    (pode?'<button class="btn ghost sm" data-rev="'+esc(chave)+'">Atualizar revisão</button>':"")+"</div>";
+}
+function editarRevisao(chave){
+  var r=revisaoDe(chave)||{};
+  modal("Revisão de "+(NOME_TABELA[chave]||chave),
+    '<div class="fgrid">'+
+    '<div class="fld c6"><label>Identificação da revisão</label><input type="text" data-f="versao" value="'+esc(r.versao||"")+
+      '" placeholder="REV. 09/11/23"></div>'+
+    '<div class="fld c3"><label>Data da revisão</label><input type="date" data-f="data" value="'+esc(r.data||"")+'"></div>'+
+    "</div>"+
+    '<p class="note" style="margin-top:12px">As obras salvas guardam qual revisão estava vigente. Ao mudar aqui, as obras calculadas sobre a revisão anterior passam a exibir aviso de base desatualizada.</p>',
+    async function(bg){
+      var v={}; bg.querySelectorAll("[data-f]").forEach(function(x){ v[x.getAttribute("data-f")]=x.value; });
+      if(!v.versao.trim()){ toast("Informe a identificação da revisão"); return false; }
+      S.cat[chave]=S.cat[chave]||{items:[]};
+      S.cat[chave].revisao={versao:v.versao.trim(),data:v.data||null,
+        atualizadoEm:new Date().toISOString(),atualizadoPor:S.sess.nome};
+      try{ await Store.salvarCatalogo(chave); }catch(e){ toast(e.message); return false; }
+      await Store.registrar("Atualizou revisão",chave,(NOME_TABELA[chave]||chave)+" · "+v.versao.trim());
+      toast("Revisão registrada"); render();
+    });
+}
 function viewTabela(rota){
   var cfg=TAB[rota], lista=items(cfg.cat), c=S.cat[cfg.cat];
   var q=S.q.trim().toLowerCase();
@@ -723,6 +922,7 @@ function viewTabela(rota){
   var h='<div class="phead"><div><h2>'+esc(cfg.t)+'</h2><p class="desc">'+esc(cfg.d)+"</p></div>"+
     '<div class="actions"><input type="text" class="search" id="qBusca" placeholder="Buscar" value="'+esc(S.q)+'">'+
     (editavel?'<button class="btn" id="btnNovo">Adicionar</button>':"")+"</div></div>";
+  if(TABELAS_NORMATIVAS.indexOf(cfg.cat)>=0) h+=barraRevisao(cfg.cat);
   if(!lista.length) return h+'<div class="panel"><div class="empty"><h4>Cadastro vazio</h4>'+
     "<p>Nenhum registro importado. A carga inicial é feita pelo script de importação do sistema.</p></div></div>";
   h+='<div class="panel"><div class="tbl-wrap"><table><thead><tr>'+
@@ -745,6 +945,7 @@ function viewCabos(){
   var l=items("cabos");
   var h='<div class="phead"><div><h2>Dados técnicos de cabos</h2>'+
     '<p class="desc">Características construtivas, dimensionais e elétricas do cabo protegido de média tensão e do cabo isolado de baixa tensão.</p></div></div>';
+  h+=barraRevisao("cabos");
   if(!l.length) return h+'<div class="panel"><div class="empty"><h4>Tabela não importada</h4></div></div>';
   function bloco(titulo,campo,valor){
     return '<div class="panel"><div class="panel-h"><h3>'+titulo+'</h3></div><div class="panel-b">'+
@@ -757,35 +958,45 @@ function viewCabos(){
 }
 
 function viewCintas(){
-  var l=items("cintas"), c=S.cat.cintas;
-  var h='<div class="phead"><div><h2>Diâmetro de poste e cintas</h2>'+
-    '<p class="desc">O diâmetro em qualquer ponto do poste e a cinta correspondente, calculados a partir dos parâmetros de cada bitola.</p></div></div>';
-  if(!l.length) return h+'<div class="panel"><div class="empty"><h4>Tabela não importada</h4></div></div>';
-  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Regra de cálculo</h3></div></div><div class="panel-b">'+
-    '<div class="mono" style="font-size:13px;background:var(--surface-2);padding:11px 13px;border-radius:3px;border:1px solid var(--line-2)">'+
-    esc(c.regra||"")+"</div></div></div>";
-  h+='<div class="panel"><div class="panel-h"><div><h3>Parâmetros por bitola de poste</h3></div>'+
+  var l=items("cintas");
+  var h=viewTabela("cintas");
+  if(!l.length) return h;
+  var calc='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Conferir um ponto do poste</h3>'+
+    '<p class="sub">Ø no ponto = Ø do topo + distância do topo × conicidade. A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.</p></div>'+
     '<div style="display:flex;gap:8px;align-items:flex-end"><div class="fld"><label>Bitola</label><select id="ciB">'+
     l.map(function(r,i){ return '<option value="'+i+'">'+esc(r.bitola)+"</option>"; }).join("")+"</select></div>"+
     '<div class="fld"><label>Distância do topo (mm)</label><input type="number" id="ciD" value="1000" step="10" min="0"></div>'+
-    '<button class="btn" id="ciCalc">Calcular</button></div></div><div class="panel-b" id="ciOut"></div>'+
-    '<div class="tbl-wrap"><table><thead><tr><th>Bitola</th><th class="num">Altura (m)</th><th class="num">Carga (daN)</th>'+
-    '<th class="num">Ø topo (mm)</th><th class="num">Ø base (mm)</th><th class="num">Conicidade (mm/mm)</th><th>Cintas disponíveis</th></tr></thead><tbody>'+
-    l.map(function(r){ return "<tr><td><strong>"+esc(r.bitola)+'</strong></td><td class="num">'+num(r.altura,1)+
-      '</td><td class="num">'+esc(r.carga)+'</td><td class="num">'+num(r.diamTopo,0)+'</td><td class="num">'+num(r.diamBase,0)+
-      '</td><td class="num">'+num(r.conicidade,5)+"</td><td>"+
-      r.faixas.map(function(f){ return '<span class="pill" style="margin-right:4px">Ø'+f.cinta+"</span>"; }).join("")+"</td></tr>"; }).join("")+
-    "</tbody></table></div></div>";
-  return h;
+    '<button class="btn" id="ciCalc">Calcular</button></div></div><div class="panel-b" id="ciOut"></div></div>';
+  // insere a calculadora logo abaixo do cabeçalho, antes da tabela
+  var corte=h.indexOf('<div class="panel">');
+  return h.slice(0,corte)+calc+h.slice(corte);
 }
 
+function viewAnexo1(){
+  var l=anexo1Tipos(), lig=anexo1Ligacoes(), c=S.cat.anexo1;
+  var h='<div class="phead"><div><h2>Anexo 1 — previsão de consumo</h2>'+
+    '<p class="desc">'+esc((c&&c.referencia)||"")+". Substitui a GED 3738 como base do cálculo de kVA.</p></div></div>";
+  h+=barraRevisao("anexo1");
+  if(!l.length) return h+'<div class="panel"><div class="empty"><h4>Tabela não importada</h4></div></div>';
+  h+='<div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Tipo de empreendimento</th>'+
+    lig.map(function(x){ return '<th class="num">'+esc(x.nome)+"</th>"; }).join("")+"</tr></thead><tbody>"+
+    l.map(function(r){ return "<tr><td>"+esc(r.tipo)+"</td>"+lig.map(function(x){
+      var v=r.consumo[x.codigo];
+      return '<td class="num">'+(v===undefined?'<span style="color:var(--line-strong)">—</span>':num(v)+" kWh")+"</td>"; }).join("")+"</tr>"; }).join("")+
+    '</tbody></table></div><div class="tbl-foot"><span>'+l.length+" tipos · "+lig.length+" ligações</span>"+
+    "<span>Os traços são combinações que o Anexo 1 não prevê</span></div></div>";
+  h+='<p class="note" style="margin-top:10px">Tabela publicada pela concessionária, mantida somente leitura. Quando for revisada, o caminho é reimportar o documento inteiro.</p>';
+  return h;
+}
 function viewGed3738(){
   var l=items("ged3738"), lig=(S.cat.ged3738&&S.cat.ged3738.ligacoes)||[], c=S.cat.ged3738;
   var q=S.q.trim().toLowerCase();
   var fil=!q?l:l.filter(function(r){ return r.atividade.toLowerCase().indexOf(q)>=0; });
   var h='<div class="phead"><div><h2>GED 3738 — consumo por atividade</h2><p class="desc">'+
-    esc((c&&c.referencia)||"Consumo estimado por atividade e tipo de ligação.")+"</p></div>"+
+    "Base anterior ao Anexo 1, mantida para consulta e para conferir obras calculadas antes da troca. Não alimenta mais o cálculo.</p></div>"+
     '<div class="actions"><input type="text" class="search" id="qBusca" placeholder="Buscar atividade" value="'+esc(S.q)+'"></div></div>';
+  h+=barraRevisao("ged3738");
+  h+='<p class="note" style="margin:-4px 0 14px">Tabela publicada pela concessionária, mantida somente leitura. Quando a GED for revisada, o caminho é reimportar o documento inteiro.</p>';
   if(!l.length) return h+'<div class="panel"><div class="empty"><h4>Tabela não importada</h4></div></div>';
   h+='<div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Atividade</th>'+
     lig.map(function(x){ return '<th class="num" title="'+esc((x.fases||"")+" "+(x.tensao||"")+" · renda "+(x.renda||""))+'">'+esc(x.codigo)+"</th>"; }).join("")+
@@ -863,7 +1074,8 @@ function formCampos(defs,valores){
   return '<div class="fgrid">'+defs.map(function(d){
     var t=d[2]||"text";
     return '<div class="fld c3"><label>'+esc(d[1])+'</label><input type="'+t+'" data-f="'+d[0]+'" value="'+
-      esc(valores[d[0]]===null||valores[d[0]]===undefined?"":valores[d[0]])+'"'+(t==="number"?' step="any"':"")+"></div>"; }).join("")+"</div>";
+      esc(valores[d[0]]===null||valores[d[0]]===undefined?"":valores[d[0]])+'"'+(t==="number"?' step="any"':"")+
+      (d[3]?' maxlength="'+d[3]+'"':"")+"></div>"; }).join("")+"</div>";
 }
 function lerForm(bg){ var o={};
   bg.querySelectorAll("[data-f]").forEach(function(i){
@@ -876,6 +1088,13 @@ function editarRegistro(rota,idx){
   modal((novo?"Adicionar em ":"Editar registro de ")+cfg.t.toLowerCase(),formCampos(cfg.form,base),async function(bg){
     var rec=Object.assign({},base,lerForm(bg));
     if(!String(rec[cfg.form[0][0]]||"").trim()){ toast("Preencha "+cfg.form[0][1].toLowerCase()); return false; }
+    if(cfg.cat==="materiais"&&String(rec.codigo||"").length>10){ toast("O código aceita no máximo 10 caracteres"); return false; }
+    if(cfg.cat==="concessionarias"&&(rec.constA===null||rec.constB===null)){ toast("Informe as constantes A e B"); return false; }
+    if(cfg.derivar){
+      if(!(Number(rec.diamBase)>Number(rec.diamTopo))){ toast("O diâmetro da base tem que ser maior que o do topo"); return false; }
+      if(!(Number(rec.distanciaTopo)>=10)){ toast("A distância a partir do topo tem mínimo de 10 mm"); return false; }
+      cfg.derivar(rec);
+    }
     if(novo) lista.push(rec); else lista[idx]=rec;
     S.cat[cfg.cat].items=lista;
     try{ await Store.salvarCatalogo(cfg.cat); }catch(e){ toast(e.message); return false; }
@@ -938,6 +1157,7 @@ function render(){
     case "registro": corpo=can("log.ler")?viewRegistro():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "cabos": corpo=viewCabos(); break;
     case "cintas": corpo=viewCintas(); break;
+    case "anexo1": corpo=viewAnexo1(); break;
     case "ged3738": corpo=viewGed3738(); break;
     default: corpo=TAB[S.route]?viewTabela(S.route):viewPainel();
   }
@@ -1042,8 +1262,23 @@ function ligarEventos(){
         }
       }
     });
-    inp.addEventListener("blur",function(){ if(inp.type!=="number"&&inp.tagName!=="SELECT") render(); });
+    inp.addEventListener("blur",function(){
+      if(inp.tagName==="SELECT") return;
+      // Campo numérico não formata, mas precisa redesenhar os painéis derivados.
+      if(inp.type==="number"){ render(); return; }
+      var o=S.rascunho; if(!o) return;
+      var k=inp.getAttribute("data-k"), def=null;
+      FD.forEach(function(s){ s.campos.forEach(function(c){ if(c.k===k) def=c; }); });
+      if(def&&def.fmt){
+        var formatado=aplicarFormato(def,o[k],o);
+        if(formatado!==o[k]){ o[k]=formatado; inp.value=formatado; }
+      }
+      render();
+    });
   });
+
+  document.querySelectorAll("[data-rev]").forEach(function(b){
+    b.addEventListener("click",function(){ editarRevisao(b.getAttribute("data-rev")); }); });
 
   var bn=document.getElementById("btnNovo");
   if(bn) bn.addEventListener("click",function(){ editarRegistro(S.route,-1); });
@@ -1076,9 +1311,7 @@ function ligarEventos(){
     var l=items("cintas"), r=l[Number(document.getElementById("ciB").value)];
     var d=Number(document.getElementById("ciD").value), out=document.getElementById("ciOut");
     if(d<0||d>r.altura*1000){ out.innerHTML='<span class="chip bad">Distância fora do comprimento do poste ('+num(r.altura*1000,0)+" mm)</span>"; return; }
-    var dia=r.diamTopo+d*r.conicidade, cinta=null;
-    r.faixas.forEach(function(f){ if(cinta===null&&dia<=f.ate+0.001) cinta=f.cinta; });
-    if(cinta===null) cinta=r.faixas[r.faixas.length-1].cinta;
+    var dia=r.diamTopo+d*r.conicidade, cinta=cintaPara(dia);
     out.innerHTML='<div class="grid g3" style="gap:10px">'+
       '<div><div style="font-size:11.5px;color:var(--muted)">Diâmetro no ponto</div><div class="mono" style="font-size:20px">'+num(dia,1)+" mm</div></div>"+
       '<div><div style="font-size:11.5px;color:var(--muted)">Cinta indicada</div><div class="mono" style="font-size:20px;color:var(--accent)">Ø '+cinta+" mm</div></div>"+

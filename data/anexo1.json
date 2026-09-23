@@ -1,0 +1,10 @@
+{"items":[
+{"tipo":"Residencial (lotes até 500m²)","classe":"Residencial","faixa":"ate500","consumo":{"monofasico":280,"bifasico":350,"trifasico":690}},
+{"tipo":"Residencial (lotes acima de 500m²)","classe":"Residencial","faixa":"acima500","consumo":{"bifasico":690,"trifasico":2380}},
+{"tipo":"Comercial (lotes até 500m²)","classe":"Comercial","faixa":"ate500","consumo":{"bifasico":365,"trifasico":1580}},
+{"tipo":"Comercial (lotes acima de 500m²)","classe":"Comercial","faixa":"acima500","consumo":{"trifasico":3280}},
+{"tipo":"Industrial","classe":"Industrial","faixa":null,"consumo":{"trifasico":3520}}
+],
+"ligacoes":[{"codigo":"monofasico","nome":"Monofásico"},{"codigo":"bifasico","nome":"Bifásico"},{"codigo":"trifasico","nome":"Trifásico"}],
+"referencia":"Anexo 1 — Previsão de consumo (kWh) por tipo de empreendimento",
+"revisao":{"versao":"","data":null,"atualizadoEm":null,"atualizadoPor":null}}
