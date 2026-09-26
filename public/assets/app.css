@@ -170,6 +170,13 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;
 .consist .bar i{display:block;height:100%;background:var(--accent)}
 .consist.bad .bar i{background:var(--alert)}
 
+.pontos{display:flex;flex-wrap:wrap;gap:4px;max-width:420px}
+.ponto{display:inline-flex;align-items:baseline;gap:4px;font-size:11px;font-family:"IBM Plex Mono",monospace;
+  border:1px solid var(--line-2);border-radius:2px;padding:1px 5px;background:var(--surface-2);white-space:nowrap}
+.ponto b{color:var(--muted);font-weight:500}
+.ponto i{font-style:normal;color:var(--accent);font-weight:500}
+.ponto.fora{border-color:var(--alert);background:var(--alert-soft)}
+.ponto.fora i{color:var(--alert)}
 .derivado{color:var(--muted);border-bottom:1px dotted var(--line-strong)}
 .revbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
   padding:9px 14px;margin-bottom:14px;border:1px solid var(--line);border-left:3px solid var(--accent);

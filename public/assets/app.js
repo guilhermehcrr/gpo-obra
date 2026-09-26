@@ -339,12 +339,21 @@ function validarObra(o){
   FD.forEach(function(s){ s.campos.forEach(function(c){
     var v=o[c.k], vazio=(v===undefined||v===null||String(v).trim()==="");
     if(obrigatorio(c,o)&&vazio){ errs.push({sec:s.id,secT:s.titulo,k:c.k,l:c.l,tipo:"obrigatorio",msg:"Campo obrigatório não preenchido"}); return; }
+    if(valorOrfao(c,v)){
+      errs.push({sec:s.id,secT:s.titulo,k:c.k,l:c.l,tipo:"orfao",
+        msg:'"'+v+'" não existe mais na lista. Escolha um valor atual.'});
+      return;
+    }
     if(!vazio&&c.val&&!c.val(c.tipo==="number"?Number(v):v))
       errs.push({sec:s.id,secT:s.titulo,k:c.k,l:c.l,tipo:"formato",msg:c.msg||"Valor inválido"});
   });});
   [["T1","lotesT1","atividadeT1","ligacaoT1","tipo 1"],["T2","lotesT2","atividadeT2","ligacaoT2","tipo 2"]].forEach(function(t){
     var ativ=o[t[2]], lig=o[t[3]], lote=Number(o[t[1]]);
     if(t[0]==="T2"&&!(Number(o.qtdT2)>0)) return;
+    var defAtiv=null, defLig=null;
+    FD.forEach(function(s){ s.campos.forEach(function(c){ if(c.k===t[2]) defAtiv=c; if(c.k===t[3]) defLig=c; }); });
+    var orfaoA=valorOrfao(defAtiv,ativ), orfaoL=valorOrfao(defLig,lig);
+    if(orfaoA||orfaoL) return; // já sinalizado como valor fora da lista
     if(!ativ||!lig) return;
     if(consumoAnexo1(ativ,lig)===null)
       errs.push({sec:"projeto",secT:"Dados do projeto",k:t[3],l:"Ligação do consumidor "+t[4],tipo:"formato",
@@ -370,6 +379,20 @@ function validarObra(o){
 function totalCampos(){ var n=0; FD.forEach(function(s){ n+=s.campos.length; }); return n; }
 // A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.
 function cintaPara(diametro){ return Math.ceil((diametro-5)/10)*10; }
+var QTD_PONTOS=10;
+// Diâmetro e cinta em cada ponto de fixação declarado para a bitola.
+function pontosDe(r){
+  var out=[];
+  for(var i=0;i<QTD_PONTOS;i++){
+    var d=(r.distancias||[])[i];
+    if(d===null||d===undefined||d===""){ out.push({n:i+1,d:null}); continue; }
+    d=Number(d);
+    var dia=r.diamTopo+d*r.conicidade;
+    out.push({n:i+1,d:d,diametro:Number(dia.toFixed(1)),cinta:cintaPara(dia),
+              fora:d>r.altura*1000});
+  }
+  return out;
+}
 function recalcularBitola(r){
   var altura=Number(r.altura)||0, topo=Number(r.diamTopo)||0, base=Number(r.diamBase)||0;
   r.conicidade = altura>0 ? Number(((base-topo)/(altura*1000)).toFixed(5)) : 0;
@@ -688,6 +711,21 @@ function viewObras(){
   return h+'</tbody></table></div><div class="tbl-foot"><span>'+S.obras.length+" obra"+(S.obras.length>1?"s":"")+"</span></div></div>";
 }
 
+// Opções válidas de um campo de seleção, na forma [valor, rótulo].
+function opcoesDe(c){
+  if(c.tipo==="municipio") return items("municipios").map(function(m){ return [m.municipio, m.municipio+" / "+m.uf]; });
+  if(c.tipo==="atividade") return anexo1Tipos().map(function(a){ return [a.tipo, a.tipo]; });
+  if(c.tipo==="ligacao") return anexo1Ligacoes().map(function(l){ return [l.codigo, l.nome]; });
+  if(c.tipo==="select") return (c.ops||[]).map(function(x){ return [x,x]; });
+  return null;
+}
+// Valor gravado que saiu da lista, por troca de tabela ou de cadastro.
+function valorOrfao(c,v){
+  if(v===undefined||v===null||String(v).trim()==="") return false;
+  var ops=opcoesDe(c);
+  if(!ops||!ops.length) return false;
+  return !ops.some(function(par){ return String(par[0])===String(v); });
+}
 function campoHTML(c,o,errs){
   var err=null; errs.forEach(function(e){ if(e.k===c.k) err=e; });
   var v=o[c.k]===undefined||o[c.k]===null?"":o[c.k];
@@ -696,14 +734,13 @@ function campoHTML(c,o,errs){
   var inner;
   if(c.tipo==="select"||c.tipo==="municipio"||c.tipo==="atividade"||c.tipo==="ligacao"){
     var ops=[];
-    var pares=[];
-    if(c.tipo==="municipio") pares=items("municipios").map(function(m){ return [m.municipio, m.municipio+" / "+m.uf]; });
-    else if(c.tipo==="atividade") pares=anexo1Tipos().map(function(a){ return [a.tipo, a.tipo]; });
-    else if(c.tipo==="ligacao") pares=anexo1Ligacoes().map(function(l){ return [l.codigo, l.nome]; });
-    else pares=(c.ops||[]).map(function(x){ return [x,x]; });
-    inner='<select data-k="'+c.k+'"'+dis+'><option value="">—</option>'+
+    var pares=opcoesDe(c)||[];
+    var orfao=valorOrfao(c,v);
+    inner='<select data-k="'+c.k+'"'+dis+'>'+
+      (orfao?'<option value="'+esc(v)+'" selected>'+esc(v)+" (fora da lista atual)</option>":"")+
+      '<option value=""'+(!orfao&&!v?" selected":"")+">—</option>"+
       pares.map(function(par){
-        return '<option value="'+esc(par[0])+'"'+(String(v)===par[0]?" selected":"")+">"+esc(par[1])+"</option>"; }).join("")+"</select>";
+        return '<option value="'+esc(par[0])+'"'+(String(v)===String(par[0])?" selected":"")+">"+esc(par[1])+"</option>"; }).join("")+"</select>";
   } else if(c.tipo==="textarea"){
     inner='<textarea data-k="'+c.k+'" rows="2"'+dis+">"+esc(v)+"</textarea>";
   } else {
@@ -759,7 +796,7 @@ function viewFolha(){
   if(errs.length){
     h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h3>Pendências</h3></div>'+
       '<div class="panel-b" style="display:flex;flex-wrap:wrap;gap:7px">'+
-      errs.map(function(e){ return '<span class="chip '+(e.tipo==="coerencia"?"warn":"bad")+'">'+esc(e.l)+" — "+esc(e.msg)+"</span>"; }).join("")+
+      errs.map(function(e){ return '<span class="chip '+(e.tipo==="coerencia"||e.tipo==="orfao"?"warn":"bad")+'">'+esc(e.l)+" — "+esc(e.msg)+"</span>"; }).join("")+
       "</div></div>";
   }
   if(mi){
@@ -774,8 +811,9 @@ function viewFolha(){
         '</div><div class="mono" style="font-size:14px;margin-top:2px">'+esc(r[1]===null||r[1]===undefined?"—":r[1])+"</div></div>"; }).join("")+
       "</div></div>";
   }
+  var temOrfao=errs.some(function(e){ return e.tipo==="orfao"; });
   var c1=consumoAnexo1(o.atividadeT1,o.ligacaoT1), c2=consumoAnexo1(o.atividadeT2,o.ligacaoT2);
-  if(o.atividadeT1||o.atividadeT2){
+  if((o.atividadeT1||o.atividadeT2)&&!temOrfao){
     var linhas=[["Consumidor tipo 1",o.atividadeT1,o.ligacaoT1,c1,Number(o.qtdT1)||0],
                 ["Consumidor tipo 2",o.atividadeT2,o.ligacaoT2,c2,Number(o.qtdT2)||0]]
                .filter(function(l){ return l[1]; });
@@ -876,13 +914,18 @@ var TAB={
    cols:[["bitola","Bitola"],["altura","Altura (m)",function(v){return num(v,1);},1],["carga","Carga (daN)",null,1],
          ["diamTopo","Ø topo (mm)",function(v){return num(v,0);},1],["diamBase","Ø base (mm)",function(v){return num(v,0);},1],
          ["conicidade","Conicidade (mm/mm)",function(v){return num(v,5);},1],
-         ["distanciaTopo","Dist. do topo (mm)",function(v){return num(v,0);},1],
-         ["faixas","Cintas",function(v){ return (v||[]).map(function(f){ return '<span class="pill" style="margin-right:4px">Ø'+f.cinta+"</span>"; }).join(""); }]],
+
+         ["distancias","Pontos de fixação (D1 a D10)",function(v,r){
+            var ps=pontosDe(r), tem=ps.filter(function(p){ return p.d!==null; }).length;
+            if(!tem) return '<span class="pill">nenhum definido</span>';
+            return '<div class="pontos">'+ps.filter(function(p){ return p.d!==null; }).map(function(p){
+              return '<span class="ponto'+(p.fora?" fora":"")+'" title="'+(p.fora?"Além do comprimento do poste":"Ø "+num(p.diametro,1)+" mm")+'">'+
+                '<b>D'+p.n+"</b>"+num(p.d,0)+' <i>Ø'+p.cinta+"</i></span>"; }).join("")+"</div>"; }]],
    busca:["bitola","carga"],perm:"norm",derivar:recalcularBitola,
-   novo:{bitola:"",altura:9,carga:"",diamTopo:null,diamBase:null,distanciaTopo:10},
+   novo:{bitola:"",altura:9,carga:"",diamTopo:null,diamBase:null,distancias:[10,null,null,null,null,null,null,null,null,null]},
    form:[["bitola","Bitola (ex.: 9/300)"],["altura","Altura (m)","number"],["carga","Carga nominal (daN)"],
-         ["diamTopo","Diâmetro do topo (mm)","number"],["diamBase","Diâmetro da base (mm)","number"],
-         ["distanciaTopo","Distância a partir do topo (mm)","number"]]}
+         ["diamTopo","Diâmetro do topo (mm)","number"],["diamBase","Diâmetro da base (mm)","number"]],
+   formExtra:formPontos, lerExtra:lerPontos}
 };
 
 function barraRevisao(chave){
@@ -1070,6 +1113,28 @@ function modal(titulo,corpo,onOk,okLabel){
   var first=bg.querySelector("input,select,textarea"); if(first) first.focus();
   return bg;
 }
+function formPontos(r){
+  var ps=pontosDe(r);
+  return '<div style="margin-top:16px;border-top:1px solid var(--line-2);padding-top:14px">'+
+    '<div style="font-size:12.5px;margin-bottom:4px"><strong>Pontos de fixação</strong></div>'+
+    '<p class="note" style="margin:0 0 10px">Distância a partir do topo, em milímetros, mínimo de 10. '+
+    'Cada estrutura da concessionária usa o ponto que lhe corresponde. Deixe em branco os que ainda não forem usados.</p>'+
+    '<div class="fgrid">'+ps.map(function(p){
+      return '<div class="fld c1"><label>D'+p.n+'</label><input type="number" data-p="'+p.n+'" min="10" step="10" value="'+
+        (p.d===null?"":p.d)+'">'+
+        (p.d===null?"":'<div class="drv">'+(p.fora?'<span style="color:var(--alert)">além do poste</span>':"Ø "+num(p.diametro,1)+" → cinta Ø"+p.cinta)+"</div>")+
+        "</div>"; }).join("")+"</div></div>";
+}
+function lerPontos(bg,rec){
+  var d=[];
+  for(var i=1;i<=QTD_PONTOS;i++){
+    var inp=bg.querySelector('[data-p="'+i+'"]');
+    var v=inp?inp.value:"";
+    d.push(v===""?null:Number(v));
+  }
+  rec.distancias=d;
+  return d;
+}
 function formCampos(defs,valores){
   return '<div class="fgrid">'+defs.map(function(d){
     var t=d[2]||"text";
@@ -1085,14 +1150,23 @@ function lerForm(bg){ var o={};
 function editarRegistro(rota,idx){
   var cfg=TAB[rota], lista=items(cfg.cat);
   var novo=idx<0, base=novo?Object.assign({},cfg.novo):Object.assign({},lista[idx]);
-  modal((novo?"Adicionar em ":"Editar registro de ")+cfg.t.toLowerCase(),formCampos(cfg.form,base),async function(bg){
+  modal((novo?"Adicionar em ":"Editar registro de ")+cfg.t.toLowerCase(),
+    formCampos(cfg.form,base)+(cfg.formExtra?cfg.formExtra(base):""),async function(bg){
     var rec=Object.assign({},base,lerForm(bg));
+    if(cfg.lerExtra) cfg.lerExtra(bg,rec);
     if(!String(rec[cfg.form[0][0]]||"").trim()){ toast("Preencha "+cfg.form[0][1].toLowerCase()); return false; }
     if(cfg.cat==="materiais"&&String(rec.codigo||"").length>10){ toast("O código aceita no máximo 10 caracteres"); return false; }
     if(cfg.cat==="concessionarias"&&(rec.constA===null||rec.constB===null)){ toast("Informe as constantes A e B"); return false; }
     if(cfg.derivar){
       if(!(Number(rec.diamBase)>Number(rec.diamTopo))){ toast("O diâmetro da base tem que ser maior que o do topo"); return false; }
-      if(!(Number(rec.distanciaTopo)>=10)){ toast("A distância a partir do topo tem mínimo de 10 mm"); return false; }
+      var ruim=null, alem=null;
+      (rec.distancias||[]).forEach(function(d,i){
+        if(d===null||d===undefined) return;
+        if(!(Number(d)>=10)) ruim=ruim||("D"+(i+1));
+        if(Number(d)>Number(rec.altura)*1000) alem=alem||("D"+(i+1));
+      });
+      if(ruim){ toast("O ponto "+ruim+" está abaixo do mínimo de 10 mm"); return false; }
+      if(alem){ toast("O ponto "+alem+" passa do comprimento do poste"); return false; }
       cfg.derivar(rec);
     }
     if(novo) lista.push(rec); else lista[idx]=rec;
