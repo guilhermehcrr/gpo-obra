@@ -303,7 +303,10 @@ var FD=[
  {id:"empreiteira",titulo:"Dados da empreiteira",campos:[
   {k:"empreiteira",fmt:"titulo",l:"Empreiteira",req:1,w:3},
   {k:"cnpjEmp",fmt:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
-  {k:"cftEmp",l:"CFT",w:1},{k:"ieEmp",fmt:"ie",l:"Inscrição estadual",w:2},
+  {k:"conselhoEmp",l:"Conselho",w:1,tipo:"select",ops:["CREA","CAU","CFT"],
+   nota:"CREA para nível superior, CAU para arquitetura e urbanismo, CFT para técnico industrial."},
+  {k:"registroEmp",fmt:"maiuscula",l:"Registro no conselho",w:2,reqSe:function(o){ return !!o.conselhoEmp; }},
+  {k:"ieEmp",fmt:"ie",l:"Inscrição estadual",w:2},
   {k:"ruaEmp",fmt:"titulo",l:"Rua",w:3},{k:"numEmp",l:"Nº",w:1},
   {k:"bairroEmp",fmt:"titulo",l:"Bairro",w:2},{k:"munEmp",l:"Município",w:3,tipo:"municipio"},
   {k:"ufEmp",fmt:"maiuscula",l:"UF",w:1,ro:1,drv:"Preenchida pelo município"},
@@ -317,7 +320,9 @@ var FD=[
   {k:"cpfEmp",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
   {k:"testEmp",fmt:"titulo",l:"Testemunha da contratada",w:2},{k:"rgTestEmp",l:"RG",w:2},
   {k:"cpfTestEmp",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"respTecnico",fmt:"titulo",l:"Responsável técnico",req:1,w:3},{k:"cftRT",l:"CFT do responsável técnico",w:2}
+  {k:"respTecnico",fmt:"titulo",l:"Responsável técnico",req:1,w:3},
+  {k:"conselhoRT",l:"Conselho do responsável técnico",req:1,w:1,tipo:"select",ops:["CREA","CAU","CFT"]},
+  {k:"registroRT",fmt:"maiuscula",l:"Registro no conselho",req:1,w:2}
  ]},
  {id:"parametros",titulo:"Parâmetros de cálculo",campos:[
   {k:"qtMaxSec",l:"Queda de tensão máxima na rede secundária (%)",req:1,w:2,tipo:"number",step:"0.1",
@@ -367,6 +372,11 @@ function validarObra(o){
         errs.push({sec:"projeto",secT:"Dados do projeto",k:t[1],l:"Tamanho médio dos lotes "+t[4],tipo:"coerencia",
           msg:"Lote de "+num(lote)+" m² com faixa acima de 500 m² selecionada"});
     }
+  });
+  [["registroEmp","conselhoEmp","da empreiteira"],["registroRT","conselhoRT","do responsável técnico"]].forEach(function(t){
+    if(o[t[0]]&&!o[t[1]])
+      errs.push({sec:"empreiteira",secT:"Dados da empreiteira",k:t[1],l:"Conselho "+t[2],tipo:"formato",
+        msg:"Informe a qual conselho o registro pertence"});
   });
   if(Number(o.qtdT1)>0&&Number(o.lotesT1)>0&&Number(o.lotesT1)<50)
     errs.push({sec:"projeto",secT:"Dados do projeto",k:"lotesT1",l:"Tamanho médio dos lotes tipo 1",
@@ -433,10 +443,17 @@ function municipioInfo(nome){
 /* ==========================================================================
    CARGA
    ========================================================================== */
+// Obras gravadas quando o campo era só "CFT", antes de virar conselho + registro.
+function migrarConselho(o){
+  if(o.cftEmp&&!o.registroEmp){ o.conselhoEmp=o.conselhoEmp||"CFT"; o.registroEmp=String(o.cftEmp).toUpperCase(); }
+  if(o.cftRT&&!o.registroRT){ o.conselhoRT=o.conselhoRT||"CFT"; o.registroRT=String(o.cftRT).toUpperCase(); }
+  delete o.cftEmp; delete o.cftRT;
+  return o;
+}
 async function carregar(){
   try{
     var d=await Store.carregar();
-    S.cat=d.catalogos||{}; S.obras=d.obras||[]; S.usuarios=d.usuarios||[];
+    S.cat=d.catalogos||{}; S.obras=(d.obras||[]).map(migrarConselho); S.usuarios=d.usuarios||[];
     S.precisaPrimeiro=!!d.precisaPrimeiroAcesso;
     if(d.sessao) S.sess=d.sessao;
     S.offline=false;
