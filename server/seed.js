@@ -34,7 +34,8 @@ const forcar = process.argv.includes("--forcar");
   for (const arq of fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort()) {
     const chave = path.basename(arq, ".json");
     const corpo = JSON.parse(fs.readFileSync(path.join(dir, arq), "utf8"));
-    const qtd = Array.isArray(corpo.items) ? corpo.items.length : 0;
+    const qtd = Array.isArray(corpo.items) ? corpo.items.length
+      : Object.values(corpo).filter(Array.isArray).reduce((n, a) => n + a.length, 0);
     total += qtd;
 
     if (existentes[chave] && !forcar) {

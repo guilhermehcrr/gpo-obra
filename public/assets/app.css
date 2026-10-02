@@ -170,6 +170,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;
 .consist .bar i{display:block;height:100%;background:var(--accent)}
 .consist.bad .bar i{background:var(--alert)}
 
+tbody tr.fora{background:var(--alert-soft)}
+tbody tr.fora:hover{background:var(--alert-soft);filter:brightness(.97)}
+.tbl-wrap table td input,.tbl-wrap table td select{padding:3px 6px;font-size:12.5px;min-width:60px}
+.tbl-wrap table td input[type=number]{text-align:right;font-family:"IBM Plex Mono",monospace}
 .pontos{display:flex;flex-wrap:wrap;gap:4px;max-width:420px}
 .ponto{display:inline-flex;align-items:baseline;gap:4px;font-size:11px;font-family:"IBM Plex Mono",monospace;
   border:1px solid var(--line-2);border-radius:2px;padding:1px 5px;background:var(--surface-2);white-space:nowrap}

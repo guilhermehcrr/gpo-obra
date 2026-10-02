@@ -8,7 +8,8 @@ var S = { sess:null, route:"painel", obraId:null, q:"", cat:{}, obras:[], usuari
           log:[], ready:false, offline:false, precisaPrimeiro:false, grupos:{},
           rascunho:null, original:"", salvoEm:null, salvando:false };
 
-var CHAVES_NORMATIVAS = ["normas","padroes","especificacoes","fornecedores_aprovados","ged","ged3738","cintas","cabos"];
+var CHAVES_NORMATIVAS = ["normas","padroes","especificacoes","fornecedores_aprovados","ged","ged3738","cintas","cabos",
+  "cabos_qt","trafos","luminarias","empreendimentos","estruturas"];
 
 var PERFIS = {
   admin:{nome:"Administrador",desc:"Acesso total, inclusive usuários e registro de operações"},
@@ -40,7 +41,7 @@ function items(k){ var c=S.cat[k]; return (c&&c.items)||[]; }
 function revisaoDe(k){ var c=S.cat[k]; return (c&&c.revisao)||null; }
 function rotuloRevisao(k){ var r=revisaoDe(k); return r&&r.versao?r.versao:"não informada"; }
 // Tabelas cuja revisão é carimbada na obra, porque entram no cálculo ou no memorial.
-var TABELAS_NORMATIVAS=["anexo1","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
+var TABELAS_NORMATIVAS=["anexo1","cabos_qt","trafos","luminarias","empreendimentos","estruturas","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
 function revisoesAtuais(){
   var o={};
   TABELAS_NORMATIVAS.forEach(function(k){ var r=revisaoDe(k); if(r&&r.versao) o[k]=r.versao; });
@@ -55,7 +56,9 @@ function revisoesDefasadas(obra){
   });
   return fora;
 }
-var NOME_TABELA={anexo1:"Anexo 1 — previsão de consumo",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
+var NOME_TABELA={anexo1:"Anexo 1 — previsão de consumo",
+  cabos_qt:"Cabos — queda de tensão",trafos:"Transformadores",luminarias:"Luminárias",
+  empreendimentos:"Tipos de empreendimento",estruturas:"Estruturas por ângulo",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
   padroes:"Padrões de instalação",especificacoes:"Especificações técnicas",
   fornecedores_aprovados:"Fornecedores aprovados",cintas:"Diâmetro de poste e cintas",cabos:"Dados técnicos de cabos"};
 function initials(n){ return (n||"?").split(/\s+/).slice(0,2).map(function(w){return w[0];}).join("").toUpperCase(); }
@@ -102,7 +105,9 @@ function storePrevia(DB){
     fornecedores:"catalog/fornecedores", fabricantes:"catalog/fabricantes", unidades:"catalog/unidades",
     servicos:"catalog/servicos", normas:"normativas/normas", padroes:"normativas/padroes",
     especificacoes:"normativas/especificacoes", fornecedores_aprovados:"normativas/fornecedores_aprovados",
-    anexo1:"normativas/anexo1", ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos" };
+    anexo1:"normativas/anexo1", ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos",
+    cabos_qt:"normativas/cabos_qt", trafos:"normativas/trafos", luminarias:"normativas/luminarias",
+    empreendimentos:"normativas/empreendimentos", estruturas:"normativas/estruturas" };
   var usuariosCache = [];
   return {
     tipo:"previa",
@@ -228,6 +233,232 @@ function okCEP(v){ return digitos(v).length===8; }
 function okEmail(v){ return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v||""); }
 
 /* ==========================================================================
+   MOTOR DE ENGENHARIA
+   Cada função reproduz uma regra da planilha de origem. São puras: recebem
+   os valores e devolvem o resultado, sem tocar na tela nem no banco.
+   ========================================================================== */
+
+/* Arredondamento conforme a folha de dados (ARRED / TRUNCAR / para cima / para baixo). */
+function cortar(v,funcao,casas){
+  if(v===null||v===undefined||isNaN(v)) return 0;
+  var f=Math.pow(10,casas===undefined?2:casas);
+  switch(funcao){
+    case "TRUNCAR": return Math.trunc(v*f)/f;
+    case "ARREDONDAR.PARA.CIMA": return Math.ceil(v*f)/f;
+    case "ARREDONDAR.PARA.BAIXO": return Math.floor(v*f)/f;
+    default: return Math.round(v*f)/f;   // ARRED
+  }
+}
+function trunc(v,casas){ return cortar(v,"TRUNCAR",casas); }
+
+/* Demanda por consumidor, em kVA.  kVA = (A × kWh)^B
+   A e B são as constantes da concessionária; kWh vem do Anexo 1. */
+function demandaConsumidor(constA,constB,kWh){
+  if(!constA||!constB||!kWh) return 0;
+  return cortar(Math.pow(constA*kWh,constB),"ARRED",2);
+}
+
+/* Fator de potência e carregamento admissível, por tipo de empreendimento. */
+function empreendimentoInfo(tipo){
+  var l=items("empreendimentos"), r=null;
+  l.forEach(function(x){ if(x.tipo&&tipo&&x.tipo.toLowerCase()===String(tipo).toLowerCase()) r=x; });
+  return r;
+}
+function fatorPotencia(tipo){ var e=empreendimentoInfo(tipo); return e?e.fatorPotencia:1; }
+
+/* Consumo da luminária, em kVA. */
+function potenciaLuminaria(modelo){
+  var r=0; items("luminarias").forEach(function(x){ if(x.modelo===modelo) r=x.consumo; });
+  return r||0;
+}
+
+/* Coeficiente de queda de tensão do cabo (GED 3667 Tab. 4.1).
+   Escolhido pela tensão nominal da rede e pelo fator de potência. */
+function coefCabo(bitola,tensaoNominal,fp){
+  var c=null; items("cabos_qt").forEach(function(x){ if(x.bitola===String(bitola)) c=x; });
+  if(!c) return null;
+  var faixa=Number(tensaoNominal)>275?"380":"220";
+  var pot=Number(fp)===1?"1":"092";
+  var v=c.coef[faixa+"_"+pot];
+  return (v===null||v===undefined)?null:v;
+}
+function amperagemCabo(bitola){
+  var r=null; items("cabos_qt").forEach(function(x){ if(x.bitola===String(bitola)) r=x.amperagem; });
+  return r;
+}
+
+/* Estrutura a partir do ângulo de aplicação entre trechos. */
+function estruturaPorAngulo(angulo,nivel){
+  var t=S.cat.estruturas; if(!t) return null;
+  var faixas=(nivel==="secundaria")?t.secundarias:t.primarias;
+  var a=Number(angulo), r=null;
+  (faixas||[]).forEach(function(f){ if(r===null&&a>=f.de&&a<=f.ate) r=f; });
+  return r;
+}
+
+/* Contexto de cálculo da obra: tudo que não varia de ponto para ponto. */
+function contextoCalculo(obra){
+  var mi=municipioInfo(obra.municipio);
+  var c=mi?constantesDe(mi):{constA:null,constB:null};
+  var fp=fatorPotencia(obra.tipoEmpreendimento);
+  return {
+    constA:c.constA, constB:c.constB,
+    tensaoNominal: mi?mi.tensaoSecFF:null,
+    tensaoFN: mi?mi.tensaoSecFN:null,
+    fatorPotencia: fp,
+    demT1: demandaConsumidor(c.constA,c.constB,consumoAnexo1(obra.atividadeT1,obra.ligacaoT1)),
+    demT2: demandaConsumidor(c.constA,c.constB,consumoAnexo1(obra.atividadeT2,obra.ligacaoT2)),
+    potLum1: potenciaLuminaria(obra.luminaria),
+    potLum2: potenciaLuminaria(obra.luminaria2),
+    funcao: obra.funcaoArred||"ARRED",
+    casas: obra.casasDecimais===undefined?2:Number(obra.casasDecimais),
+    limiteSec: Number(obra.qtMaxSec)||0,
+    limiteIP: Number(obra.qtMaxIP)||0,
+    caboSec: obra.caboSecundario||null
+  };
+}
+
+/* Consumo estimado do loteamento, em kWh/mês. */
+function consumoLoteamento(obra){
+  var k1=consumoAnexo1(obra.atividadeT1,obra.ligacaoT1)||0;
+  var k2=consumoAnexo1(obra.atividadeT2,obra.ligacaoT2)||0;
+  return (Number(obra.qtdT1)||0)*k1 + (Number(obra.qtdT2)||0)*k2;
+}
+
+/* Carga de um ponto, em kVA. */
+function cargaDoPonto(p,ctx){
+  if(!p) return 0;
+  return (Number(p.consT1)||0)*ctx.demT1
+       + (Number(p.consT2)||0)*ctx.demT2
+       + (Number(p.lumT1)||0)*ctx.potLum1
+       + (Number(p.lumT2)||0)*ctx.potLum2
+       + (Number(p.cargaEspecial)||0);
+}
+
+/* Percorre a topologia de um transformador e devolve, para cada trecho:
+   carga própria do ponto de chegada, carga acumulada a jusante, momento
+   elétrico, queda do trecho, queda acumulada, tensão e corrente.
+
+   O momento usa a carga local pela metade (centro de gravidade do trecho)
+   e a carga de jusante inteira, como na planilha de origem. */
+function calcularCircuito(obra,trafoId){
+  var ctx=contextoCalculo(obra);
+  var pontos={}, filhos={}, cargas={};
+  (obra.pontos||[]).forEach(function(p){ pontos[String(p.id)]=p; });
+  var trechos=(obra.trechos||[]).filter(function(t){
+    return String(t.trafo||"")===String(trafoId) && t.de && t.para; });
+  trechos.forEach(function(t){
+    var k=String(t.de);
+    (filhos[k]=filhos[k]||[]).push(t);
+  });
+  Object.keys(pontos).forEach(function(k){ cargas[k]=cargaDoPonto(pontos[k],ctx); });
+
+  var trafo=null; (obra.trafos||[]).forEach(function(x){ if(String(x.id)===String(trafoId)) trafo=x; });
+  var raiz=trafo?String(trafo.ponto):null;
+  var saida=[], visitados={}, ciclo=false;
+
+  // Carga total a jusante de um ponto, incluindo a dele próprio.
+  function jusante(ponto,pilha){
+    var k=String(ponto);
+    if(pilha[k]){ ciclo=true; return 0; }
+    pilha[k]=1;
+    var soma=cargas[k]||0;
+    (filhos[k]||[]).forEach(function(t){ soma+=jusante(t.para,pilha); });
+    delete pilha[k];
+    return soma;
+  }
+
+  function descer(ponto,quedaAcum,pilha){
+    var k=String(ponto);
+    if(pilha[k]){ ciclo=true; return; }
+    pilha[k]=1;
+    (filhos[k]||[]).forEach(function(t){
+      var destino=String(t.para);
+      var local=cargas[destino]||0;
+      var aJusante=0;
+      (filhos[destino]||[]).forEach(function(f){ aJusante+=jusante(f.para,{}); });
+      var mom=trunc(((local/2+aJusante)*(Number(t.comprimento)||0))/100,2);
+      var bitola=t.bitola||ctx.caboSec;
+      var coef=coefCabo(bitola,ctx.tensaoNominal,ctx.fatorPotencia);
+      var queda=(coef===null)?null:cortar(mom*coef,ctx.funcao,ctx.casas);
+      var acum=(queda===null)?quedaAcum:cortar(quedaAcum+queda,ctx.funcao,ctx.casas);
+      var tensao=ctx.tensaoNominal?ctx.tensaoNominal-(ctx.tensaoNominal*acum/100):null;
+      var corrente=(tensao&&mom)?mom*1000/tensao/Math.sqrt(3):0;
+      var limite=(t.classificacao==="IP")?ctx.limiteIP:ctx.limiteSec;
+      saida.push({
+        de:k, para:destino, comprimento:Number(t.comprimento)||0,
+        classificacao:t.classificacao||"S", bitola:bitola,
+        cargaLocal:local, cargaJusante:aJusante, momento:mom,
+        coef:coef, queda:queda, quedaAcumulada:acum,
+        tensao:tensao, corrente:corrente,
+        amperagem:amperagemCabo(bitola),
+        limite:limite,
+        excedeQueda:(queda!==null&&limite>0&&acum>limite),
+        excedeCorrente:(amperagemCabo(bitola)&&corrente>amperagemCabo(bitola)),
+        semCoeficiente:(coef===null&&!!bitola)
+      });
+      descer(destino,acum,pilha);
+    });
+    delete pilha[k];
+  }
+
+  if(raiz) descer(raiz,0,{});
+  return {trechos:saida, ciclo:ciclo, ctx:ctx, raiz:raiz,
+          cargaTotal:raiz?jusante(raiz,{}):0};
+}
+
+/* Demanda total vista pelo transformador, já corrigida pelo fator de potência. */
+function demandaTrafo(obra,trafoId){
+  var r=calcularCircuito(obra,trafoId), ctx=r.ctx;
+  var tot={consT1:0,consT2:0,lumT1:0,lumT2:0,cargaEspecial:0};
+  var dentro={};
+  r.trechos.forEach(function(t){ dentro[t.para]=1; });
+  if(r.raiz) dentro[r.raiz]=1;
+  (obra.pontos||[]).forEach(function(p){
+    if(!dentro[String(p.id)]) return;
+    tot.consT1+=Number(p.consT1)||0; tot.consT2+=Number(p.consT2)||0;
+    tot.lumT1+=Number(p.lumT1)||0;   tot.lumT2+=Number(p.lumT2)||0;
+    tot.cargaEspecial+=Number(p.cargaEspecial)||0;
+  });
+  var fp=ctx.fatorPotencia||1;
+  var demanda=(tot.consT1*ctx.demT1)/fp + (tot.consT2*ctx.demT2)/fp
+            + tot.lumT1*ctx.potLum1 + tot.lumT2*ctx.potLum2 + tot.cargaEspecial;
+  return {totais:tot, demanda:demanda, ctx:ctx, pontos:Object.keys(dentro).length};
+}
+
+/* Menor transformador que comporta a demanda, pelo carregamento do tipo de obra. */
+function dimensionarTrafo(demanda,tipoEmpreendimento){
+  var t=S.cat.trafos; if(!t||!demanda) return null;
+  var nucleo=/núcleo/i.test(tipoEmpreendimento||"");
+  var fator=(t.fatores&&(nucleo?t.fatores["Núcleo habitacional"]:t.fatores["Loteamento"]))||1.5;
+  var escolhido=null;
+  (t.items||[]).forEach(function(x){
+    var max=(nucleo?x.maxNucleo:x.maxLoteamento);
+    if(max===null||max===undefined) max=x.nominal*fator;
+    if(escolhido===null&&demanda<=max) escolhido={nominal:x.nominal,maximo:max};
+  });
+  return escolhido;
+}
+
+/* Quantidade máxima de consumidores tipo 1 que o transformador comporta.
+   Na planilha é "Qtd. Max. Cons. TP1": é o total, não o que ainda sobra. */
+function maxConsumidoresT1(obra,trafoId,potenciaNominal){
+  var d=demandaTrafo(obra,trafoId), ctx=d.ctx;
+  var alvo=dimensionarTrafo(d.demanda,obra.tipoEmpreendimento);
+  var max=potenciaNominal?null:(alvo?alvo.maximo:null);
+  if(potenciaNominal){
+    var nucleo=/núcleo/i.test(obra.tipoEmpreendimento||"");
+    (((S.cat.trafos||{}).items)||[]).forEach(function(x){
+      if(Number(x.nominal)===Number(potenciaNominal)) max=nucleo?x.maxNucleo:x.maxLoteamento;
+    });
+  }
+  if(!max||!ctx.demT1) return null;
+  var livre=max - d.totais.cargaEspecial - d.totais.lumT1*ctx.potLum1
+          - d.totais.lumT2*ctx.potLum2 - d.totais.consT2*ctx.demT2;
+  return Math.max(0,Math.floor(livre/ctx.demT1));
+}
+
+/* ==========================================================================
    FOLHA DE DADOS — esquema e regras
    ========================================================================== */
 var FD=[
@@ -276,6 +507,8 @@ var FD=[
   {k:"gedKvas",l:"Tabela para cálculo do kVA",req:1,w:3,tipo:"select",
    ops:["Anexo 1 — Previsão de consumo (kWh) por tipo de empreendimento"]},
   {k:"caboPrimario",l:"Cabo principal da rede primária",req:1,w:2,tipo:"select",ops:["E70","E50","E35","CA 1/0","CA 4/0"]},
+  {k:"caboSecundario",l:"Cabo padrão da rede secundária",req:1,w:2,tipo:"cabo",
+   nota:"Usado no cálculo de queda de tensão quando o trecho não indicar outra bitola."},
   {k:"vaoBasico",l:"Vão básico entre postes (m)",req:1,w:1,tipo:"number",min:20,max:60,
    val:function(v){return v>=20&&v<=60;},msg:"Entre 20 e 60 m"},
   {k:"lotesT1",l:"Tamanho médio dos lotes tipo 1 (m²)",req:1,w:2,tipo:"number",min:1},
@@ -289,8 +522,10 @@ var FD=[
    nota:"Deixe zero quando não houver segundo tipo de consumidor."},
   {k:"consumidoresEspeciais",l:"Consumidores especiais (portaria, clube, administração, salão de festas)",w:6,tipo:"textarea",
    nota:"Quantificar e descrever cada tipo. Deixar em branco se não houver."},
-  {k:"luminaria",l:"Luminária mais utilizada",req:1,w:3,tipo:"select",
-   ops:["LED 100 W","LED 150 W","LED 250 W","Vapor de sódio 100 W","Vapor de sódio 150 W","Vapor de sódio 250 W","Vapor de sódio 400 W"]},
+  {k:"luminaria",l:"Luminária tipo 1",req:1,w:3,tipo:"luminaria",
+   nota:"Modelo e consumo conforme a tabela da concessionária."},
+  {k:"luminaria2",l:"Luminária tipo 2",w:3,tipo:"luminaria",
+   nota:"Preencher apenas quando o projeto usar um segundo modelo."},
   {k:"respProjeto",fmt:"titulo",l:"Responsabilidade do projeto",w:3},
   {k:"numeroProjeto",l:"Número do projeto",w:2},{k:"trt",l:"TRT",w:2},
   {k:"refEletricas",l:"Referências elétricas",w:2},{k:"numAtividade",l:"Número da atividade",w:2},
@@ -597,7 +832,7 @@ function viewTop(){
 }
 function tituloRota(){
   var t=""; MENU.forEach(function(g){ g.itens.forEach(function(i){ if(i.r===S.route) t=i.l; }); });
-  if(S.route==="folha") t="Folha de dados";
+  ABAS_OBRA.forEach(function(x){ if(x.r===S.route) t=x.l; });
   return t||"Painel";
 }
 
@@ -664,10 +899,30 @@ function abrirFolha(id){
   var o=obraPorId(id);
   if(!o) return;
   S.obraId=id;
-  S.rascunho=JSON.parse(JSON.stringify(o));
-  S.original=JSON.stringify(o);
+  S.rascunho=sincronizarDerivados(JSON.parse(JSON.stringify(o)));
+  S.original=JSON.stringify(S.rascunho);
   S.salvoEm=null;
   S.route="folha";
+}
+/* Campos que não se digitam: saem do município escolhido. Derivados na abertura
+   e antes de cada gravação, para que uma obra vinda do banco nunca mostre vazio
+   um valor que o cadastro já sabe. */
+function sincronizarDerivados(o){
+  if(!o) return o;
+  var m=municipioInfo(o.municipio);
+  if(m){ o.uf=m.uf; o.concessionaria=m.concessionaria; }
+  var mc=municipioInfo(o.municipioCli); if(mc) o.ufCli=mc.uf;
+  var me=municipioInfo(o.munEmp);       if(me) o.ufEmp=me.uf;
+  return o;
+}
+function emObra(){ return S.route==="folha"||S.route==="topologia"||S.route==="queda"; }
+function marcarSujo(){
+  var bar=document.querySelector(".salvabar");
+  if(bar&&!bar.classList.contains("sujo")){
+    bar.classList.add("sujo");
+    bar.querySelector(".estado").innerHTML='<span class="ponto"></span>Alterações não salvas';
+    bar.querySelectorAll("button").forEach(function(b){ b.disabled=false; });
+  }
 }
 function folhaAlterada(){ return !!S.rascunho && JSON.stringify(S.rascunho)!==S.original; }
 function fecharFolha(){ S.rascunho=null; S.original=""; S.salvoEm=null; }
@@ -676,6 +931,7 @@ async function salvarFolha(){
   S.salvando=true;
   try{
     S.rascunho.revisoes=revisoesAtuais();
+    sincronizarDerivados(S.rascunho);
     await Store.salvarObra(S.rascunho);
     var i=-1; S.obras.forEach(function(x,k){ if(x._id===S.rascunho._id) i=k; });
     S.rascunho.atualizadoEm=new Date().toISOString();
@@ -733,6 +989,10 @@ function opcoesDe(c){
   if(c.tipo==="municipio") return items("municipios").map(function(m){ return [m.municipio, m.municipio+" / "+m.uf]; });
   if(c.tipo==="atividade") return anexo1Tipos().map(function(a){ return [a.tipo, a.tipo]; });
   if(c.tipo==="ligacao") return anexo1Ligacoes().map(function(l){ return [l.codigo, l.nome]; });
+  if(c.tipo==="luminaria") return items("luminarias").map(function(x){
+    return [x.modelo, x.modelo+(x.consumo?" · "+num(x.consumo,3)+" kVA":"")+(x.tipo?" · "+x.tipo:"")]; });
+  if(c.tipo==="cabo") return items("cabos_qt").filter(function(x){ return x.coef["380_1"]!==null; })
+    .map(function(x){ return [x.bitola, x.bitola+" "+x.unidade+" · "+num(x.amperagem)+" A"]; });
   if(c.tipo==="select") return (c.ops||[]).map(function(x){ return [x,x]; });
   return null;
 }
@@ -749,7 +1009,7 @@ function campoHTML(c,o,errs){
   var req=obrigatorio(c,o);
   var dis=(!can("obra.edit")||c.ro)?" disabled":"";
   var inner;
-  if(c.tipo==="select"||c.tipo==="municipio"||c.tipo==="atividade"||c.tipo==="ligacao"){
+  if(c.tipo==="select"||c.tipo==="municipio"||c.tipo==="atividade"||c.tipo==="ligacao"||c.tipo==="luminaria"||c.tipo==="cabo"){
     var ops=[];
     var pares=opcoesDe(c)||[];
     var orfao=valorOrfao(c,v);
@@ -771,18 +1031,14 @@ function campoHTML(c,o,errs){
     (c.nota&&!err?'<div class="drv">'+esc(c.nota)+"</div>":"")+"</div>";
 }
 
-function viewFolha(){
-  var o=S.rascunho;
-  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
-  var errs=validarObra(o), tot=totalCampos();
-  var preench=tot-errs.filter(function(e){ return e.tipo==="obrigatorio"; }).length;
-  var pct=Math.round(preench/tot*100);
-  var mi=municipioInfo(o.municipio);
-
+/* Cabeçalho comum das telas de uma obra: título, abas e barra de gravação. */
+var ABAS_OBRA=[{r:"folha",l:"Folha de dados"},{r:"topologia",l:"Vãos entre pontos"},{r:"queda",l:"Queda de tensão"}];
+function cabecalhoObra(o,desc){
   var h='<div class="phead"><div><h2>'+esc(o.empreendimento||"Nova obra")+"</h2>"+
-    '<p class="desc">Folha de dados do cliente, da obra, do projeto e da empreiteira.</p></div>'+
+    '<p class="desc">'+esc(desc)+"</p></div>"+
     '<div class="actions"><button class="btn ghost" id="btnVoltar">Voltar para obras</button></div></div>';
-
+  h+='<div class="tabs">'+ABAS_OBRA.map(function(a){
+    return '<button data-aba="'+a.r+'" class="'+(S.route===a.r?"on":"")+'">'+esc(a.l)+"</button>"; }).join("")+"</div>";
   var sujo=folhaAlterada();
   h+='<div class="salvabar'+(sujo?" sujo":"")+'"><div class="estado">'+
     (sujo?'<span class="ponto"></span>Alterações não salvas'
@@ -792,6 +1048,18 @@ function viewFolha(){
     '<button class="btn ghost sm" id="btnDescartar"'+(sujo?"":" disabled")+'>Descartar</button>'+
     '<button class="btn" id="btnSalvar"'+(sujo&&can("obra.edit")?"":" disabled")+'>'+
     (S.salvando?"Salvando…":"Salvar")+'</button></div></div>';
+  return h;
+}
+
+function viewFolha(){
+  var o=S.rascunho;
+  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
+  var errs=validarObra(o), tot=totalCampos();
+  var preench=tot-errs.filter(function(e){ return e.tipo==="obrigatorio"; }).length;
+  var pct=Math.round(preench/tot*100);
+  var mi=municipioInfo(o.municipio);
+
+  var h=cabecalhoObra(o,"Folha de dados do cliente, da obra, do projeto e da empreiteira.");
 
   h+='<div class="consist'+(errs.length?" bad":"")+'"><div><strong>'+
     (errs.length?errs.length+" ponto"+(errs.length>1?"s":"")+" a resolver":"Folha consistente")+"</strong>"+
@@ -854,6 +1122,197 @@ function viewFolha(){
       '<div class="sect-b"><div class="fgrid">'+s.campos.map(function(c){ return campoHTML(c,o,errs); }).join("")+"</div></div></div>";
   });
   return h+'<p class="note">As alterações só vão para o banco quando você clicar em Salvar.</p>';
+}
+
+/* ==========================================================================
+   VÃOS ENTRE PONTOS
+   Três grades: transformadores, pontos e trechos. Juntas formam a topologia
+   que a queda de tensão e o esforço mecânico percorrem.
+   ========================================================================== */
+function proximoId(lista,prefixo){
+  var n=0;
+  (lista||[]).forEach(function(x){
+    var m=String(x.id||"").replace(prefixo||"","");
+    if(/^\d+$/.test(m)) n=Math.max(n,Number(m));
+  });
+  return (prefixo||"")+(n+1);
+}
+function grade(titulo,sub,chave,colunas,linhas,rotulo,acoes){
+  var editavel=can("obra.edit");
+  var h='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>'+esc(titulo)+"</h3>"+
+    (sub?'<p class="sub">'+esc(sub)+"</p>":"")+"</div>"+
+    (editavel?'<div class="actions">'+(acoes||"")+'<button class="btn sm" data-add="'+chave+'">Adicionar '+esc(rotulo)+"</button></div>":"")+"</div>";
+  if(!linhas.length) return h+'<div class="empty" style="padding:28px"><p>Nenhum '+esc(rotulo)+" lançado.</p></div></div>";
+  h+='<div class="tbl-wrap"><table><thead><tr>'+
+    colunas.map(function(c){ return "<th"+(c.num?' class="num"':"")+' style="min-width:'+(c.w||80)+'px">'+esc(c.l)+"</th>"; }).join("")+
+    (editavel?"<th></th>":"")+"</tr></thead><tbody>";
+  linhas.forEach(function(r,i){
+    h+="<tr>"+colunas.map(function(c){
+      if(c.calc) return "<td"+(c.num?' class="num"':"")+">"+c.calc(r,i)+"</td>";
+      var v=r[c.k]===undefined||r[c.k]===null?"":r[c.k];
+      var attr=' data-g="'+chave+'" data-i="'+i+'" data-k="'+c.k+'"'+(editavel?"":" disabled");
+      if(c.ops) return '<td><select'+attr+'><option value="">—</option>'+
+        c.ops().map(function(p){ return '<option value="'+esc(p[0])+'"'+(String(v)===String(p[0])?" selected":"")+">"+esc(p[1])+"</option>"; }).join("")+"</select></td>";
+      return "<td"+(c.num?' class="num"':"")+'><input type="'+(c.tipo||"text")+'"'+attr+' value="'+esc(v)+'"'+
+        (c.step?' step="'+c.step+'"':"")+(c.min!==undefined?' min="'+c.min+'"':"")+"></td>";
+    }).join("")+
+    (editavel?'<td style="text-align:right"><button class="btn danger sm" data-del="'+chave+'" data-i="'+i+'">Excluir</button></td>':"")+"</tr>";
+  });
+  return h+"</tbody></table></div></div>";
+}
+
+function viewTopologia(){
+  var o=S.rascunho;
+  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
+  o.trafos=o.trafos||[]; o.pontos=o.pontos||[]; o.trechos=o.trechos||[];
+  var ctx=contextoCalculo(o);
+  var h=cabecalhoObra(o,"Transformadores, pontos e trechos da rede. É a topologia que alimenta a queda de tensão e o esforço mecânico.");
+
+  var faltam=[];
+  if(!ctx.constA||!ctx.constB) faltam.push("as constantes do município");
+  if(!ctx.demT1) faltam.push("o tipo de empreendimento e a ligação do consumidor tipo 1");
+  if(!ctx.caboSec) faltam.push("o cabo padrão da rede secundária");
+  if(faltam.length)
+    h+='<div class="consist bad"><div><strong>Faltam dados na folha</strong><div class="note">Preencha '+
+       faltam.join(", ")+" para o cálculo rodar.</div></div></div>";
+
+  var kwh1=consumoAnexo1(o.atividadeT1,o.ligacaoT1), kwh2=consumoAnexo1(o.atividadeT2,o.ligacaoT2);
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Cálculo de demanda</h3>'+
+    '<p class="sub">kVA = (A × kWh)<sup>B</sup> — a conta está aberta para conferência contra a planilha de origem.</p></div></div>'+
+    '<div class="tbl-wrap"><table><thead><tr><th>Consumidor</th><th class="num">A</th><th class="num">B</th>'+
+    '<th class="num">kWh/mês</th><th class="num">Demanda (kVA)</th><th class="num">Qtd.</th>'+
+    '<th class="num">Total (kVA)</th></tr></thead><tbody>'+
+    [["Tipo 1",kwh1,ctx.demT1,Number(o.qtdT1)||0],["Tipo 2",kwh2,ctx.demT2,Number(o.qtdT2)||0]]
+      .filter(function(l){ return l[1]; })
+      .map(function(l){
+        return "<tr><td>"+l[0]+'</td><td class="num">'+num(ctx.constA,4)+'</td><td class="num">'+num(ctx.constB,4)+
+          '</td><td class="num">'+num(l[1],0)+'</td><td class="num"><strong>'+num(l[2],2)+
+          "</strong>"+(l[2]>10?' <span class="chip warn">conferir</span>':"")+
+          '</td><td class="num">'+num(l[3])+'</td><td class="num">'+num(l[2]*l[3],2)+"</td></tr>"; }).join("")+
+    "</tbody></table></div>"+
+    '<div class="tbl-foot"><span>Consumo estimado do empreendimento: '+num(consumoLoteamento(o),0)+
+    " kWh/mês</span><span>Fator de potência "+num(ctx.fatorPotencia,2)+" · "+esc(o.tipoEmpreendimento||"—")+"</span></div></div>";
+  if(ctx.demT1>10)
+    h+='<div class="consist bad"><div><strong>Demanda por consumidor acima do usual</strong>'+
+       '<div class="note">'+num(ctx.demT1,2)+" kVA por consumidor tipo 1. A fórmula é a da planilha de origem, "+
+       "mas vale conferir contra uma obra já aprovada antes de seguir — "+
+       "a troca da GED 3738 pelo Anexo 1 mudou o kWh que entra na conta.</div></div></div>";
+
+  var opsPontos=function(){ return (o.pontos||[]).map(function(p){ return [p.id,String(p.id)]; }); };
+  var opsTrafos=function(){ return (o.trafos||[]).map(function(t){ return [t.id,String(t.id)]; }); };
+  var opsCabo=function(){ return items("cabos_qt").filter(function(x){ return x.coef["380_1"]!==null; })
+    .map(function(x){ return [x.bitola,x.bitola+" "+x.unidade]; }); };
+
+  h+=grade("Transformadores","Cada transformador é a raiz de um circuito.","trafos",[
+    {k:"id",l:"Nº",w:70},
+    {k:"ponto",l:"Ponto de instalação",w:150,ops:opsPontos},
+    {k:"potencia",l:"Potência (kVA)",w:120,num:1,ops:function(){
+      return (((S.cat.trafos||{}).items)||[]).map(function(x){ return [x.nominal,num(x.nominal,1)+" kVA"]; }); }},
+    {l:"Demanda (kVA)",num:1,w:110,calc:function(r){
+      var d=demandaTrafo(o,r.id); return '<span class="mono">'+num(d.demanda,2)+"</span>"; }},
+    {l:"Sugerido",num:1,w:110,calc:function(r){
+      var d=demandaTrafo(o,r.id), s=dimensionarTrafo(d.demanda,o.tipoEmpreendimento);
+      if(!s) return "—";
+      var ok=Number(r.potencia)===s.nominal;
+      return '<span class="chip '+(r.potencia?(ok?"ok":"warn"):"")+'">'+num(s.nominal,1)+" kVA</span>"; }},
+    {l:"Máx. cons. tipo 1",num:1,w:150,calc:function(r){
+      var m=maxConsumidoresT1(o,r.id,r.potencia);
+      if(m===null) return "—";
+      var d=demandaTrafo(o,r.id), atual=d.totais.consT1;
+      return '<span class="mono">'+num(atual)+" / "+num(m)+"</span>"+
+        (atual>m?' <span class="chip bad">acima</span>':""); }}
+  ],o.trafos,"transformador");
+
+  h+=grade("Pontos","Cargas instaladas em cada ponto da rede.","pontos",[
+    {k:"id",l:"Ponto",w:80},
+    {k:"consT1",l:"Consum. tipo 1",tipo:"number",min:0,num:1,w:110},
+    {k:"consT2",l:"Consum. tipo 2",tipo:"number",min:0,num:1,w:110},
+    {k:"lumT1",l:"Lumin. tipo 1",tipo:"number",min:0,num:1,w:100},
+    {k:"lumT2",l:"Lumin. tipo 2",tipo:"number",min:0,num:1,w:100},
+    {k:"cargaEspecial",l:"Carga especial (kVA)",tipo:"number",step:"0.01",min:0,num:1,w:140},
+    {l:"Carga no ponto (kVA)",num:1,w:140,calc:function(r){
+      return '<span class="mono">'+num(cargaDoPonto(r,ctx),3)+"</span>"; }}
+  ],o.pontos,"ponto");
+
+  h+=grade("Trechos","Ligação entre dois pontos, com comprimento e bitola.","trechos",[
+    {k:"trafo",l:"Trafo",w:80,ops:opsTrafos},
+    {k:"de",l:"De",w:90,ops:opsPontos},
+    {k:"para",l:"Para",w:90,ops:opsPontos},
+    {k:"comprimento",l:"Comprimento (m)",tipo:"number",step:"0.1",min:0,num:1,w:130},
+    {k:"classificacao",l:"Classificação",w:130,ops:function(){
+      return [["S","Secundária"],["P","Primária"],["IP","Iluminação pública"],["M","Mergulho"],["N","Neutro"]]; }},
+    {k:"bitola",l:"Bitola",w:110,ops:opsCabo}
+  ],o.trechos,"trecho");
+
+  return h+'<p class="note">O ponto onde o transformador está instalado é a raiz do circuito. Os trechos saem dele em cadeia ou em ramificação.</p>';
+}
+
+/* ==========================================================================
+   QUEDA DE TENSÃO
+   ========================================================================== */
+function viewQueda(){
+  var o=S.rascunho;
+  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
+  var h=cabecalhoObra(o,"Queda de tensão por transformador, comparada aos limites da folha de dados.");
+  var trafos=o.trafos||[];
+  if(!trafos.length) return h+'<div class="panel"><div class="empty"><h4>Nenhum transformador lançado</h4>'+
+    "<p>O cálculo percorre a topologia a partir de cada transformador. Cadastre ao menos um na aba de vãos entre pontos.</p></div></div>";
+
+  var ctx=contextoCalculo(o);
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-b grid g4" style="gap:10px">'+
+    [["Tensão secundária",ctx.tensaoNominal?num(ctx.tensaoNominal,0)+" / "+num(ctx.tensaoFN,0)+" V":"—"],
+     ["Fator de potência",num(ctx.fatorPotencia,2)],
+     ["Limite rede secundária",ctx.limiteSec?num(ctx.limiteSec,1)+" %":"—"],
+     ["Limite iluminação pública",ctx.limiteIP?num(ctx.limiteIP,1)+" %":"—"]]
+    .map(function(r){ return '<div><div style="font-size:11.5px;color:var(--muted)">'+esc(r[0])+
+      '</div><div class="mono" style="font-size:15px;margin-top:2px">'+esc(r[1])+"</div></div>"; }).join("")+"</div></div>";
+
+  trafos.forEach(function(tr){
+    var r=calcularCircuito(o,tr.id);
+    var pior=0, fora=0, semCoef=0;
+    r.trechos.forEach(function(t){
+      if(t.quedaAcumulada>pior) pior=t.quedaAcumulada;
+      if(t.excedeQueda) fora++;
+      if(t.semCoeficiente) semCoef++;
+    });
+    h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div>'+
+      "<h3>Transformador "+esc(tr.id)+(tr.potencia?" · "+num(tr.potencia,1)+" kVA":"")+"</h3>"+
+      '<p class="sub">'+r.trechos.length+" trecho"+(r.trechos.length===1?"":"s")+
+      " · carga total "+num(r.cargaTotal,2)+" kVA</p></div>"+
+      "<div>"+(r.ciclo?'<span class="chip bad">topologia com laço</span>':
+        (fora?'<span class="chip bad">'+fora+" trecho"+(fora>1?"s":"")+" acima do limite</span>":
+         (r.trechos.length?'<span class="chip ok">dentro do limite · pior '+num(pior,2)+"%</span>":"")))+
+      (semCoef?' <span class="chip warn">'+semCoef+" sem coeficiente de cabo</span>":"")+"</div></div>";
+    if(!r.trechos.length){
+      h+='<div class="empty" style="padding:28px"><p>'+
+        (r.raiz?"Nenhum trecho sai do ponto "+esc(r.raiz)+".":"Defina o ponto de instalação deste transformador.")+
+        "</p></div></div>";
+      return;
+    }
+    h+='<div class="tbl-wrap"><table><thead><tr><th>Trecho</th><th class="num">Compr. (m)</th><th>Bitola</th>'+
+      '<th class="num">Carga local</th><th class="num">Carga a jusante</th><th class="num">Momento</th>'+
+      '<th class="num">Queda (%)</th><th class="num">Acumulada (%)</th><th class="num">Tensão (V)</th>'+
+      '<th class="num">Corrente (A)</th></tr></thead><tbody>'+
+      r.trechos.map(function(t){
+        return "<tr"+(t.excedeQueda?' class="fora"':"")+'><td class="mono">'+esc(t.de)+" → "+esc(t.para)+
+          (t.classificacao==="IP"?' <span class="pill">IP</span>':"")+'</td><td class="num">'+num(t.comprimento,1)+
+          "</td><td>"+(t.bitola?esc(t.bitola):'<span class="pill">sem bitola</span>')+
+          '</td><td class="num">'+num(t.cargaLocal,3)+'</td><td class="num">'+num(t.cargaJusante,3)+
+          '</td><td class="num">'+num(t.momento,2)+
+          '</td><td class="num">'+(t.queda===null?'<span class="pill">—</span>':num(t.queda,ctx.casas))+
+          '</td><td class="num"><strong>'+(t.queda===null?"—":num(t.quedaAcumulada,ctx.casas))+"</strong>"+
+          (t.excedeQueda?' <span class="chip bad">&gt; '+num(t.limite,1)+"%</span>":"")+
+          '</td><td class="num">'+(t.tensao?num(t.tensao,1):"—")+
+          '</td><td class="num">'+num(t.corrente,1)+
+          (t.excedeCorrente?' <span class="chip bad">&gt; '+num(t.amperagem)+" A</span>":"")+"</td></tr>"; }).join("")+
+      "</tbody></table></div></div>";
+  });
+
+  h+='<p class="note">Momento elétrico = ((carga local ÷ 2 + carga a jusante) × comprimento) ÷ 100. '+
+     'A carga do próprio trecho entra pela metade, por estar distribuída ao longo dele. '+
+     'A queda do trecho é o momento multiplicado pelo coeficiente do cabo na GED 3667 Tab. 4.1, '+
+     'escolhido pela tensão da rede e pelo fator de potência.</p>';
+  return h;
 }
 
 /* ==========================================================================
@@ -1244,6 +1703,8 @@ function render(){
     case "painel": corpo=viewPainel(); break;
     case "obras": corpo=viewObras(); break;
     case "folha": corpo=viewFolha(); break;
+    case "topologia": corpo=viewTopologia(); break;
+    case "queda": corpo=viewQueda(); break;
     case "usuarios": corpo=can("user.ler")?viewUsuarios():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "registro": corpo=can("log.ler")?viewRegistro():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "cabos": corpo=viewCabos(); break;
@@ -1274,7 +1735,7 @@ function ligarEventos(){
   document.querySelectorAll(".rail a").forEach(function(a){
     a.addEventListener("click",async function(){
       var destino=a.getAttribute("data-r");
-      if(S.route==="folha"&&folhaAlterada()){
+      if(emObra()&&folhaAlterada()){
         confirmarSaida(function(){ irPara(destino); });
         return;
       }
@@ -1316,6 +1777,53 @@ function ligarEventos(){
   if(volta) volta.addEventListener("click",function(){
     confirmarSaida(function(){ S.route="obras"; render(); }); });
 
+  // abas da obra — o rascunho segue aberto, não precisa confirmar nada
+  document.querySelectorAll("[data-aba]").forEach(function(b){
+    b.addEventListener("click",function(){ S.route=b.getAttribute("data-aba"); render(); }); });
+
+  // grades de topologia
+  document.querySelectorAll("[data-add]").forEach(function(b){
+    b.addEventListener("click",function(){
+      var o=S.rascunho, chave=b.getAttribute("data-add");
+      if(!o) return;
+      o[chave]=o[chave]||[];
+      if(chave==="trafos") o[chave].push({id:proximoId(o[chave],"T"),ponto:"",potencia:""});
+      else if(chave==="pontos") o[chave].push({id:proximoId(o[chave],""),consT1:0,consT2:0,lumT1:0,lumT2:0,cargaEspecial:0});
+      else o[chave].push({trafo:(o.trafos&&o.trafos[0]&&o.trafos[0].id)||"",de:"",para:"",comprimento:"",classificacao:"S",bitola:o.caboSecundario||""});
+      render();
+    });
+  });
+  document.querySelectorAll("[data-del]").forEach(function(b){
+    b.addEventListener("click",function(){
+      var o=S.rascunho, chave=b.getAttribute("data-del"), i=Number(b.getAttribute("data-i"));
+      if(!o||!o[chave]) return;
+      var alvo=o[chave][i];
+      if(chave==="pontos"&&alvo){
+        var usado=(o.trechos||[]).some(function(t){ return String(t.de)===String(alvo.id)||String(t.para)===String(alvo.id); })
+               || (o.trafos||[]).some(function(t){ return String(t.ponto)===String(alvo.id); });
+        if(usado) return toast("O ponto "+alvo.id+" está em uso em um trecho ou transformador");
+      }
+      if(chave==="trafos"&&alvo){
+        var comTrecho=(o.trechos||[]).some(function(t){ return String(t.trafo)===String(alvo.id); });
+        if(comTrecho) return toast("O transformador "+alvo.id+" ainda tem trechos ligados a ele");
+      }
+      o[chave].splice(i,1); render();
+    });
+  });
+  document.querySelectorAll("[data-g]").forEach(function(inp){
+    var ev=(inp.tagName==="SELECT")?"change":"input";
+    inp.addEventListener(ev,function(){
+      var o=S.rascunho; if(!o) return;
+      var chave=inp.getAttribute("data-g"), i=Number(inp.getAttribute("data-i")), k=inp.getAttribute("data-k");
+      var v=inp.value;
+      if(inp.type==="number") v=v===""?"":Number(v);
+      o[chave][i][k]=v;
+      if(ev==="change") render();
+      else marcarSujo();
+    });
+    inp.addEventListener("blur",function(){ if(inp.tagName!=="SELECT") render(); });
+  });
+
   var bs=document.getElementById("btnSalvar");
   if(bs) bs.addEventListener("click",async function(){ render(); await salvarFolha(); render(); });
   var bd=document.getElementById("btnDescartar");
@@ -1335,12 +1843,7 @@ function ligarEventos(){
       var k=inp.getAttribute("data-k"), v=inp.value;
       if(inp.type==="number") v=v===""?"":Number(v);
       o[k]=v;
-      if(k==="municipio"||k==="municipioCli"||k==="munEmp"){
-        var mi=municipioInfo(v);
-        if(k==="municipio"&&mi){ o.uf=mi.uf; o.concessionaria=mi.concessionaria; }
-        if(k==="municipioCli"&&mi) o.ufCli=mi.uf;
-        if(k==="munEmp"&&mi) o.ufEmp=mi.uf;
-      }
+      if(k==="municipio"||k==="municipioCli"||k==="munEmp") sincronizarDerivados(o);
       if(ev==="change"||inp.type==="date"){ render(); }
       else{
         var pend=validarObra(o), barra=document.querySelector(".consist .bar i");
@@ -1414,7 +1917,7 @@ function ligarEventos(){
    INÍCIO
    ========================================================================== */
 window.addEventListener("beforeunload",function(e){
-  if(S.route==="folha"&&folhaAlterada()){ e.preventDefault(); e.returnValue=""; }
+  if(emObra()&&folhaAlterada()){ e.preventDefault(); e.returnValue=""; }
 });
 
 (async function(){
