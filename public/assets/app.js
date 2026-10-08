@@ -251,12 +251,32 @@ function cortar(v,funcao,casas){
 }
 function trunc(v,casas){ return cortar(v,"TRUNCAR",casas); }
 
-/* Demanda por consumidor, em kVA.  kVA = (A × kWh)^B
-   A e B são as constantes da concessionária; kWh vem do Anexo 1. */
-function demandaConsumidor(constA,constB,kWh){
-  if(!constA||!constB||!kWh) return 0;
-  return cortar(Math.pow(constA*kWh,constB),"ARRED",2);
+/* Demanda de um grupo de consumidores ligados ao mesmo transformador.
+
+     kVA do grupo    = A × (Nx × kWh)^B
+     kVA por consum. = A × (Nx × kWh)^B / Nx
+
+   A e B são as constantes da concessionária, kWh é o consumo por lote e Nx é
+   o número de consumidores do grupo. A diversidade está dentro do expoente B:
+   quanto mais consumidores no mesmo transformador, menor a demanda de cada um.
+   Por isso a demanda por consumidor não é constante da obra, é do grupo.
+
+   Com tipos diferentes no mesmo transformador, Nx × kWh vira a soma dos kWh
+   de todos eles, que é a mesma conta quando o tipo é um só. */
+function demandaGrupo(ctx,n1,n2,nEsp){
+  var nx=(Number(n1)||0)+(Number(n2)||0)+(Number(nEsp)||0);
+  var vazio={nx:nx,kwhTotal:0,total:0,porConsumidor:0};
+  if(!ctx||!nx||!ctx.constA||!ctx.constB) return vazio;
+  var kwhTotal=(Number(n1)||0)*(ctx.kwh1||0)+(Number(n2)||0)*(ctx.kwh2||0);
+  if(!kwhTotal) return vazio;
+  var total=ctx.constA*Math.pow(kwhTotal,ctx.constB);
+  return {nx:nx, kwhTotal:kwhTotal,
+          total:cortar(total,ctx.funcao,ctx.casas),
+          porConsumidor:cortar(total/nx,ctx.funcao,ctx.casas)};
 }
+
+/* Mesma conta, para quando só se quer o valor por consumidor. */
+function demandaConsumidor(ctx,n1,n2,nEsp){ return demandaGrupo(ctx,n1,n2,nEsp).porConsumidor; }
 
 /* Fator de potência e carregamento admissível, por tipo de empreendimento. */
 function empreendimentoInfo(tipo){
@@ -305,17 +325,36 @@ function contextoCalculo(obra){
     constA:c.constA, constB:c.constB,
     tensaoNominal: mi?mi.tensaoSecFF:null,
     tensaoFN: mi?mi.tensaoSecFN:null,
+    tensaoPrim: mi?mi.tensaoPrimNominal:null,
     fatorPotencia: fp,
-    demT1: demandaConsumidor(c.constA,c.constB,consumoAnexo1(obra.atividadeT1,obra.ligacaoT1)),
-    demT2: demandaConsumidor(c.constA,c.constB,consumoAnexo1(obra.atividadeT2,obra.ligacaoT2)),
+    kwh1: consumoAnexo1(obra.atividadeT1,obra.ligacaoT1)||0,
+    kwh2: consumoAnexo1(obra.atividadeT2,obra.ligacaoT2)||0,
     potLum1: potenciaLuminaria(obra.luminaria),
     potLum2: potenciaLuminaria(obra.luminaria2),
     funcao: obra.funcaoArred||"ARRED",
     casas: obra.casasDecimais===undefined?2:Number(obra.casasDecimais),
     limiteSec: Number(obra.qtMaxSec)||0,
     limiteIP: Number(obra.qtMaxIP)||0,
-    caboSec: obra.caboSecundario||null
+    caboSec: obra.caboSecundario||null,
+    fatorCarreg: fatorCarregamento(obra),
+    lotesTotais: Number(obra.lotesTotais)||0,
+    lotesExistentes: Number(obra.lotesExistentes)||0
   };
+}
+
+/* Fator de carregamento admissível do transformador: KVAT = fator × KVAN.
+   Vem do tipo de empreendimento, e a obra pode sobrescrever. */
+function fatorCarregamento(obra){
+  if(obra&&obra.fatorCarreg) return Number(obra.fatorCarreg);
+  var e=empreendimentoInfo(obra&&obra.tipoEmpreendimento);
+  if(e&&e.kvatAdmissivel) return Number(e.kvatAdmissivel);
+  var t=S.cat.trafos;
+  if(t&&t.fatores){
+    var nucleo=/núcleo/i.test((obra&&obra.tipoEmpreendimento)||"");
+    var f=nucleo?t.fatores["Núcleo habitacional"]:t.fatores["Loteamento"];
+    if(f) return Number(f);
+  }
+  return 1.5;
 }
 
 /* Consumo estimado do loteamento, em kWh/mês. */
@@ -325,14 +364,30 @@ function consumoLoteamento(obra){
   return (Number(obra.qtdT1)||0)*k1 + (Number(obra.qtdT2)||0)*k2;
 }
 
-/* Carga de um ponto, em kVA. */
-function cargaDoPonto(p,ctx){
+/* Carga de um ponto, em kVA.
+
+   kvas é a demanda por consumidor do transformador que alimenta este ponto.
+   Como ela depende de quantos consumidores existem no circuito inteiro, o
+   valor chega pronto de calcularCircuito em vez de sair do contexto da obra. */
+function cargaDoPonto(p,ctx,kvas){
   if(!p) return 0;
-  return (Number(p.consT1)||0)*ctx.demT1
-       + (Number(p.consT2)||0)*ctx.demT2
+  var d=(kvas===undefined||kvas===null)?0:kvas;
+  return ((Number(p.consT1)||0)+(Number(p.consT2)||0))*d
        + (Number(p.lumT1)||0)*ctx.potLum1
        + (Number(p.lumT2)||0)*ctx.potLum2
        + (Number(p.cargaEspecial)||0);
+}
+
+/* Consumidores e luminárias de um conjunto de pontos. */
+function somarPontos(pontos){
+  var t={consT1:0,consT2:0,lumT1:0,lumT2:0,cargaEspecial:0,especiais:0};
+  (pontos||[]).forEach(function(p){
+    t.consT1+=Number(p.consT1)||0; t.consT2+=Number(p.consT2)||0;
+    t.lumT1+=Number(p.lumT1)||0;   t.lumT2+=Number(p.lumT2)||0;
+    var ce=Number(p.cargaEspecial)||0;
+    t.cargaEspecial+=ce; if(ce>0) t.especiais++;
+  });
+  return t;
 }
 
 /* Percorre a topologia de um transformador e devolve, para cada trecho:
@@ -351,11 +406,30 @@ function calcularCircuito(obra,trafoId){
     var k=String(t.de);
     (filhos[k]=filhos[k]||[]).push(t);
   });
-  Object.keys(pontos).forEach(function(k){ cargas[k]=cargaDoPonto(pontos[k],ctx); });
 
   var trafo=null; (obra.trafos||[]).forEach(function(x){ if(String(x.id)===String(trafoId)) trafo=x; });
   var raiz=trafo?String(trafo.ponto):null;
-  var saida=[], visitados={}, ciclo=false;
+  var saida=[], ciclo=false;
+
+  /* Primeiro passo: quais pontos pertencem a este transformador. A demanda por
+     consumidor depende de quantos consumidores o circuito inteiro tem, então
+     o conjunto precisa estar fechado antes de qualquer carga ser calculada. */
+  var noCircuito={};
+  (function alcancar(ponto,pilha){
+    var k=String(ponto);
+    if(!k||pilha[k]) { if(pilha[k]) ciclo=true; return; }
+    pilha[k]=1; noCircuito[k]=1;
+    (filhos[k]||[]).forEach(function(t){ alcancar(t.para,pilha); });
+    delete pilha[k];
+  })(raiz,{});
+
+  var listaPontos=Object.keys(noCircuito).map(function(k){ return pontos[k]; })
+    .filter(function(p){ return !!p; });
+  var tot=somarPontos(listaPontos);
+  var grupo=demandaGrupo(ctx,tot.consT1,tot.consT2,tot.especiais);
+  var kvas=grupo.porConsumidor;
+
+  Object.keys(pontos).forEach(function(k){ cargas[k]=cargaDoPonto(pontos[k],ctx,kvas); });
 
   // Carga total a jusante de um ponto, incluindo a dele próprio.
   function jusante(ponto,pilha){
@@ -387,6 +461,7 @@ function calcularCircuito(obra,trafoId){
       var limite=(t.classificacao==="IP")?ctx.limiteIP:ctx.limiteSec;
       saida.push({
         de:k, para:destino, comprimento:Number(t.comprimento)||0,
+        designacao:letraPonto(pontos[k],k,k===raiz)+"-"+letraPonto(pontos[destino],destino,destino===raiz),
         classificacao:t.classificacao||"S", bitola:bitola,
         cargaLocal:local, cargaJusante:aJusante, momento:mom,
         coef:coef, queda:queda, quedaAcumulada:acum,
@@ -404,58 +479,86 @@ function calcularCircuito(obra,trafoId){
 
   if(raiz) descer(raiz,0,{});
   return {trechos:saida, ciclo:ciclo, ctx:ctx, raiz:raiz,
+          totais:tot, grupo:grupo, kvas:kvas, pontos:listaPontos.length,
           cargaTotal:raiz?jusante(raiz,{}):0};
 }
 
-/* Demanda total vista pelo transformador, já corrigida pelo fator de potência. */
-function demandaTrafo(obra,trafoId){
-  var r=calcularCircuito(obra,trafoId), ctx=r.ctx;
-  var tot={consT1:0,consT2:0,lumT1:0,lumT2:0,cargaEspecial:0};
-  var dentro={};
-  r.trechos.forEach(function(t){ dentro[t.para]=1; });
-  if(r.raiz) dentro[r.raiz]=1;
-  (obra.pontos||[]).forEach(function(p){
-    if(!dentro[String(p.id)]) return;
-    tot.consT1+=Number(p.consT1)||0; tot.consT2+=Number(p.consT2)||0;
-    tot.lumT1+=Number(p.lumT1)||0;   tot.lumT2+=Number(p.lumT2)||0;
-    tot.cargaEspecial+=Number(p.cargaEspecial)||0;
-  });
-  var fp=ctx.fatorPotencia||1;
-  var demanda=(tot.consT1*ctx.demT1)/fp + (tot.consT2*ctx.demT2)/fp
-            + tot.lumT1*ctx.potLum1 + tot.lumT2*ctx.potLum2 + tot.cargaEspecial;
-  return {totais:tot, demanda:demanda, ctx:ctx, pontos:Object.keys(dentro).length};
+/* Designação do ponto no relatório: a letra escolhida pelo projetista, ou o
+   próprio número do ponto quando ainda não houver letra. A raiz sai como T,
+   que é como o formulário da concessionária marca o transformador. */
+function letraPonto(p,id,ehRaiz){
+  if(ehRaiz) return "T";
+  if(p&&p.letra) return String(p.letra).toUpperCase();
+  return String(id);
 }
 
-/* Menor transformador que comporta a demanda, pelo carregamento do tipo de obra. */
-function dimensionarTrafo(demanda,tipoEmpreendimento){
+/* Demanda vista pelo transformador.
+
+     diurna  = (Nx × kVAS) + cargas especiais
+     noturna = diurna + luminárias
+
+   A escolha do transformador e o carregamento olham a demanda noturna, que é
+   a maior das duas. O fator de potência corrige a parcela dos consumidores. */
+function demandaTrafo(obra,trafoId){
+  var r=calcularCircuito(obra,trafoId), ctx=r.ctx, tot=r.totais;
+  var fp=ctx.fatorPotencia||1;
+  var consumidores=((tot.consT1+tot.consT2)*r.kvas)/fp;
+  var iluminacao=tot.lumT1*ctx.potLum1 + tot.lumT2*ctx.potLum2;
+  var diurna=cortar(consumidores+tot.cargaEspecial,ctx.funcao,ctx.casas);
+  var noturna=cortar(diurna+iluminacao,ctx.funcao,ctx.casas);
+  return {totais:tot, grupo:r.grupo, kvas:r.kvas,
+          diurna:diurna, noturna:noturna, iluminacao:iluminacao,
+          demanda:noturna, ctx:ctx, pontos:r.pontos};
+}
+
+/* Menor transformador que comporta a demanda.
+
+   KVAT = fator × KVAN é a potência admissível. O fator vem do tipo de
+   empreendimento e pode ser sobrescrito na folha de dados. */
+function dimensionarTrafo(demanda,tipoEmpreendimento,fatorObra){
   var t=S.cat.trafos; if(!t||!demanda) return null;
-  var nucleo=/núcleo/i.test(tipoEmpreendimento||"");
-  var fator=(t.fatores&&(nucleo?t.fatores["Núcleo habitacional"]:t.fatores["Loteamento"]))||1.5;
+  var fator=Number(fatorObra)||fatorCarregamento({tipoEmpreendimento:tipoEmpreendimento});
   var escolhido=null;
   (t.items||[]).forEach(function(x){
-    var max=(nucleo?x.maxNucleo:x.maxLoteamento);
-    if(max===null||max===undefined) max=x.nominal*fator;
-    if(escolhido===null&&demanda<=max) escolhido={nominal:x.nominal,maximo:max};
+    var max=x.nominal*fator;
+    if(escolhido===null&&demanda<=max) escolhido={nominal:x.nominal,maximo:max,fator:fator};
   });
   return escolhido;
 }
 
-/* Quantidade máxima de consumidores tipo 1 que o transformador comporta.
-   Na planilha é "Qtd. Max. Cons. TP1": é o total, não o que ainda sobra. */
+/* Carregamento do transformador em %: demanda sobre a potência admissível. */
+function carregamentoTrafo(demanda,nominal,fator){
+  var f=Number(fator)||1.5, n=Number(nominal)||0;
+  if(!n||!demanda) return null;
+  var kvat=n*f;
+  return {kvat:kvat, percentual:demanda/kvat*100, fator:f};
+}
+
+/* Corrente de linha do transformador, em ampères. */
+function correnteTrafo(demanda,tensaoFF){
+  var v=Number(tensaoFF)||0;
+  if(!v||!demanda) return null;
+  return demanda*1000/(Math.sqrt(3)*v);
+}
+
+/* Quantidade máxima de consumidores que o transformador comporta.
+   Na planilha é "Qtd. Max. Cons. TP1": é o total, não o que ainda sobra.
+
+   Como a demanda do grupo é A × (N × kWh)^B, o limite sai invertendo a conta
+   em vez de dividir a sobra pela demanda de um consumidor: aquela divisão só
+   valia quando a demanda por consumidor era fixa. */
 function maxConsumidoresT1(obra,trafoId,potenciaNominal){
   var d=demandaTrafo(obra,trafoId), ctx=d.ctx;
-  var alvo=dimensionarTrafo(d.demanda,obra.tipoEmpreendimento);
-  var max=potenciaNominal?null:(alvo?alvo.maximo:null);
-  if(potenciaNominal){
-    var nucleo=/núcleo/i.test(obra.tipoEmpreendimento||"");
-    (((S.cat.trafos||{}).items)||[]).forEach(function(x){
-      if(Number(x.nominal)===Number(potenciaNominal)) max=nucleo?x.maxNucleo:x.maxLoteamento;
-    });
-  }
-  if(!max||!ctx.demT1) return null;
-  var livre=max - d.totais.cargaEspecial - d.totais.lumT1*ctx.potLum1
-          - d.totais.lumT2*ctx.potLum2 - d.totais.consT2*ctx.demT2;
-  return Math.max(0,Math.floor(livre/ctx.demT1));
+  var fator=ctx.fatorCarreg;
+  var max=potenciaNominal?Number(potenciaNominal)*fator
+                         :(function(){ var a=dimensionarTrafo(d.demanda,obra.tipoEmpreendimento,fator);
+                                       return a?a.maximo:null; })();
+  if(!max||!ctx.constA||!ctx.constB||!ctx.kwh1) return null;
+  var fp=ctx.fatorPotencia||1;
+  var livre=max - d.totais.cargaEspecial - d.totais.lumT1*ctx.potLum1 - d.totais.lumT2*ctx.potLum2;
+  if(livre<=0) return 0;
+  var kwhMax=Math.pow(livre*fp/ctx.constA,1/ctx.constB);
+  return Math.max(0,Math.floor(kwhMax/ctx.kwh1));
 }
 
 /* ==========================================================================
@@ -463,8 +566,18 @@ function maxConsumidoresT1(obra,trafoId,potenciaNominal){
    ========================================================================== */
 var FD=[
  {id:"cliente",titulo:"Dados do cliente",campos:[
+  {k:"tipoPessoa",l:"Tipo de pessoa",req:1,w:1,tipo:"select",ops:["Jurídica","Física"],
+   nota:"Define se o cliente é identificado por CNPJ ou por CPF."},
   {k:"cliente",fmt:"titulo",l:"Cliente",req:1,w:3},
-  {k:"cnpj",fmt:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido"},
+  {k:"cnpj",fmt:"cnpj",l:"CNPJ",req:1,w:2,val:okCNPJ,msg:"CNPJ inválido",
+   verSe:function(o){ return o.tipoPessoa!=="Física"; }},
+  {k:"cpfCliente",fmt:"cpf",l:"CPF do cliente",req:1,w:2,val:okCPF,msg:"CPF inválido",
+   verSe:function(o){ return o.tipoPessoa==="Física"; }},
+  {k:"rgCliente",l:"RG do cliente",w:1,verSe:function(o){ return o.tipoPessoa==="Física"; }},
+  {k:"nacCliente",fmt:"titulo",l:"Nacionalidade",w:1,verSe:function(o){ return o.tipoPessoa==="Física"; }},
+  {k:"ecCliente",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"],
+   verSe:function(o){ return o.tipoPessoa==="Física"; }},
+  {k:"profCliente",fmt:"titulo",l:"Profissão",w:2,verSe:function(o){ return o.tipoPessoa==="Física"; }},
   {k:"codigoObra",l:"Código da obra",w:1},
   {k:"rua",fmt:"titulo",l:"Rua",req:1,w:3},{k:"numero",l:"Nº",req:1,w:1},{k:"bairro",fmt:"titulo",l:"Bairro",req:1,w:2},
   {k:"municipioCli",l:"Município",req:1,w:3,tipo:"municipio"},
@@ -473,12 +586,12 @@ var FD=[
   {k:"emailNfe",fmt:"minuscula",l:"E-mail para envio de NF-e",req:1,w:3,val:okEmail,msg:"E-mail inválido"},
   {k:"respConcess",fmt:"titulo",l:"Responsável pelo cliente junto à concessionária",req:1,w:3},
   {k:"cpfResp",fmt:"cpf",l:"CPF do responsável",req:1,w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"rep1",fmt:"titulo",l:"Representante legal 1",req:1,w:2},{k:"nac1",fmt:"titulo",l:"Nacionalidade",w:2},
-  {k:"ec1",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"]},
-  {k:"rg1",l:"RG",w:2},{k:"cpf1",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
-  {k:"rep2",fmt:"titulo",l:"Representante legal 2",w:2},{k:"nac2",fmt:"titulo",l:"Nacionalidade",w:2},
-  {k:"ec2",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"]},
-  {k:"rg2",l:"RG",w:2},{k:"cpf2",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"},
+  {k:"rep1",fmt:"titulo",l:"Representante legal 1",req:1,w:2,pj:1},{k:"nac1",fmt:"titulo",l:"Nacionalidade",w:2,pj:1},
+  {k:"ec1",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"],pj:1},
+  {k:"rg1",l:"RG",w:2,pj:1},{k:"cpf1",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido",pj:1},
+  {k:"rep2",fmt:"titulo",l:"Representante legal 2",w:2,pj:1},{k:"nac2",fmt:"titulo",l:"Nacionalidade",w:2,pj:1},
+  {k:"ec2",l:"Estado civil",w:2,tipo:"select",ops:["Solteiro(a)","Casado(a)","Divorciado(a)","Viúvo(a)","União estável"],pj:1},
+  {k:"rg2",l:"RG",w:2,pj:1},{k:"cpf2",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido",pj:1},
   {k:"testCli",fmt:"titulo",l:"Testemunha da contratante",w:2},{k:"rgTestCli",l:"RG",w:2},
   {k:"cpfTestCli",fmt:"cpf",l:"CPF",w:2,val:okCPF,msg:"CPF inválido"}
  ]},
@@ -520,6 +633,10 @@ var FD=[
   {k:"ligacaoT2",l:"Ligação do consumidor tipo 2",w:1,tipo:"ligacao",reqSe:function(o){return Number(o.qtdT2)>0;}},
   {k:"qtdT2",l:"Quantidade de consumidores tipo 2",w:1,tipo:"number",min:0,
    nota:"Deixe zero quando não houver segundo tipo de consumidor."},
+  {k:"lotesTotais",l:"Quantidade total de lotes do empreendimento",w:2,tipo:"number",min:0,
+   nota:"Todos os lotes do loteamento, inclusive os que não entram nesta obra."},
+  {k:"lotesExistentes",l:"Lotes já atendidos pela rede existente",w:2,tipo:"number",min:0,
+   nota:"Lotes que já recebem energia pela rede da concessionária."},
   {k:"consumidoresEspeciais",l:"Consumidores especiais (portaria, clube, administração, salão de festas)",w:6,tipo:"textarea",
    nota:"Quantificar e descrever cada tipo. Deixar em branco se não houver."},
   {k:"luminaria",l:"Luminária tipo 1",req:1,w:3,tipo:"luminaria",
@@ -567,16 +684,30 @@ var FD=[
   {k:"funcaoArred",l:"Função para corte de casas decimais",req:1,w:2,tipo:"select",
    ops:["ARRED","ARREDONDAR.PARA.CIMA","ARREDONDAR.PARA.BAIXO","TRUNCAR"]},
   {k:"casasDecimais",l:"Nº de casas decimais para a queda de tensão",req:1,w:2,tipo:"number",min:0,max:6,
-   val:function(v){return v>=0&&v<=6;},msg:"Entre 0 e 6"}
+   val:function(v){return v>=0&&v<=6;},msg:"Entre 0 e 6"},
+  {k:"fatorCarreg",l:"Fator de carregamento do transformador (KVAT = fator × KVAN)",w:2,tipo:"number",step:"0.001",
+   val:function(v){return v>0&&v<=3;},msg:"Entre 0 e 3",
+   nota:"Em branco usa o fator do tipo de empreendimento. Núcleo habitacional 1,5 e loteamento 1,875 na planilha de origem."},
+  {k:"demandaExistente",l:"Demanda existente (kVA)",w:2,tipo:"number",step:"0.01",min:0,
+   nota:"Carga já atendida pela rede da concessionária. Sai no rodapé do relatório de queda."}
  ]}
 ];
 var PADROES={qtMaxSec:3.5,qtMaxIP:6,funcaoArred:"ARRED",casasDecimais:2,vaoBasico:35,qtdT2:0,
-  gedKvas:"GED 3738 REV. 09/11/23 PG.07/08",impressao:"Folha timbrada"};
+  tipoPessoa:"Jurídica",
+  gedKvas:"Anexo 1 — Previsão de consumo (kWh) por tipo de empreendimento",
+  impressao:"Folha timbrada"};
 
-function obrigatorio(c,o){ if(c.req) return true; if(c.reqSe) return !!c.reqSe(o); return false; }
+function obrigatorio(c,o){ if(!visivel(c,o)) return false; if(c.req) return true; if(c.reqSe) return !!c.reqSe(o); return false; }
+/* Campo que só aparece em certas condições. "pj" marca os campos que só fazem
+   sentido para pessoa jurídica, como os representantes legais. */
+function visivel(c,o){
+  if(c.pj&&o&&o.tipoPessoa==="Física") return false;
+  return c.verSe?!!c.verSe(o):true;
+}
 function validarObra(o){
   var errs=[];
   FD.forEach(function(s){ s.campos.forEach(function(c){
+    if(!visivel(c,o)) return;
     var v=o[c.k], vazio=(v===undefined||v===null||String(v).trim()==="");
     if(obrigatorio(c,o)&&vazio){ errs.push({sec:s.id,secT:s.titulo,k:c.k,l:c.l,tipo:"obrigatorio",msg:"Campo obrigatório não preenchido"}); return; }
     if(valorOrfao(c,v)){
@@ -621,7 +752,11 @@ function validarObra(o){
       tipo:"coerencia",msg:"Normalmente o limite da iluminação pública é maior que o da rede secundária"});
   return errs;
 }
-function totalCampos(){ var n=0; FD.forEach(function(s){ n+=s.campos.length; }); return n; }
+function totalCampos(o){
+  var n=0;
+  FD.forEach(function(s){ s.campos.forEach(function(c){ if(!o||visivel(c,o)) n++; }); });
+  return n;
+}
 // A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.
 function cintaPara(diametro){ return Math.ceil((diametro-5)/10)*10; }
 var QTD_PONTOS=10;
@@ -969,7 +1104,7 @@ function viewObras(){
   h+='<div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Empreendimento</th><th>Cliente</th><th>Município</th>'+
     "<th>Concessionária</th><th>Energização</th><th>Consistência</th><th>Base normativa</th><th>Atualizada</th><th></th></tr></thead><tbody>";
   S.obras.slice().sort(function(a,b){ return (b.atualizadoEm||"").localeCompare(a.atualizadoEm||""); }).forEach(function(o){
-    var e=validarObra(o), pr=Math.round((1-e.length/totalCampos())*100);
+    var e=validarObra(o), pr=Math.round((1-e.length/totalCampos(o))*100);
     h+="<tr><td><strong>"+esc(o.empreendimento||"(sem nome)")+"</strong></td><td>"+esc(o.cliente||"—")+"</td><td>"+
       esc(o.municipio||"—")+"</td><td>"+esc(o.concessionaria||"—")+'</td><td class="num">'+
       (o.dataEnergizacao?esc(o.dataEnergizacao.split("-").reverse().join("/")):"—")+"</td><td>"+
@@ -997,19 +1132,50 @@ function opcoesDe(c){
   return null;
 }
 // Valor gravado que saiu da lista, por troca de tabela ou de cadastro.
+// Município é lista aberta: o cliente pode ser de qualquer região, então um
+// nome fora do cadastro é aceito — só não traz constante nenhuma.
 function valorOrfao(c,v){
+  if(c.tipo==="municipio") return false;
   if(v===undefined||v===null||String(v).trim()==="") return false;
   var ops=opcoesDe(c);
   if(!ops||!ops.length) return false;
   return !ops.some(function(par){ return String(par[0])===String(v); });
 }
+/* Data em AAAA-MM-DD vira dd/mm/aaaa para digitação, e volta na gravação. */
+function dataBR(iso){
+  var m=String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m?m[3]+"/"+m[2]+"/"+m[1]:(iso||"");
+}
+function dataISO(br){
+  var s=String(br||"").trim();
+  var m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if(!m) return /^\d{4}-\d{2}-\d{2}$/.test(s)?s:"";
+  var d=Number(m[1]), mes=Number(m[2]), a=Number(m[3]);
+  if(d<1||d>31||mes<1||mes>12) return "";
+  return m[3]+"-"+m[2]+"-"+m[1];
+}
+/* Vai pondo as barras enquanto o usuário digita os números. */
+function mascaraData(v){
+  var d=String(v||"").replace(/\D/g,"").slice(0,8);
+  if(d.length<=2) return d;
+  if(d.length<=4) return d.slice(0,2)+"/"+d.slice(2);
+  return d.slice(0,2)+"/"+d.slice(2,4)+"/"+d.slice(4);
+}
+
 function campoHTML(c,o,errs){
   var err=null; errs.forEach(function(e){ if(e.k===c.k) err=e; });
   var v=o[c.k]===undefined||o[c.k]===null?"":o[c.k];
   var req=obrigatorio(c,o);
   var dis=(!can("obra.edit")||c.ro)?" disabled":"";
   var inner;
-  if(c.tipo==="select"||c.tipo==="municipio"||c.tipo==="atividade"||c.tipo==="ligacao"||c.tipo==="luminaria"||c.tipo==="cabo"){
+  /* Município é lista aberta: sugere os cadastrados, mas aceita qualquer nome,
+     porque há cliente de região que ainda não está na base. */
+  if(c.tipo==="municipio"){
+    var lista="mun-"+c.k;
+    inner='<input type="text" list="'+lista+'" data-k="'+c.k+'" value="'+esc(v)+'" autocomplete="off"'+dis+'>'+
+      '<datalist id="'+lista+'">'+items("municipios").map(function(m){
+        return '<option value="'+esc(m.municipio)+'">'+esc(m.municipio+" / "+m.uf)+"</option>"; }).join("")+"</datalist>";
+  } else if(c.tipo==="select"||c.tipo==="atividade"||c.tipo==="ligacao"||c.tipo==="luminaria"||c.tipo==="cabo"){
     var ops=[];
     var pares=opcoesDe(c)||[];
     var orfao=valorOrfao(c,v);
@@ -1022,8 +1188,14 @@ function campoHTML(c,o,errs){
     inner='<textarea data-k="'+c.k+'" rows="2"'+dis+">"+esc(v)+"</textarea>";
   } else {
     var t=c.tipo==="number"?"number":(c.tipo==="date"?"date":"text");
-    inner='<input type="'+t+'" data-k="'+c.k+'" value="'+esc(v)+'"'+
-      (c.step?' step="'+c.step+'"':"")+(c.min!==undefined?' min="'+c.min+'"':"")+(c.max!==undefined?' max="'+c.max+'"':"")+dis+">";
+    /* A data vai como texto com máscara, para poder ser digitada direto.
+       O valor continua gravado em AAAA-MM-DD. */
+    if(c.tipo==="date")
+      inner='<input type="text" data-k="'+c.k+'" data-data="1" value="'+esc(dataBR(v))+
+        '" placeholder="dd/mm/aaaa" inputmode="numeric" maxlength="10" autocomplete="off"'+dis+">";
+    else
+      inner='<input type="'+t+'" data-k="'+c.k+'" value="'+esc(v)+'"'+
+        (c.step?' step="'+c.step+'"':"")+(c.min!==undefined?' min="'+c.min+'"':"")+(c.max!==undefined?' max="'+c.max+'"':"")+dis+">";
   }
   return '<div class="fld c'+(c.w||2)+(err?" bad":"")+'"><label>'+esc(c.l)+(req?'<span class="req">*</span>':"")+"</label>"+inner+
     (err?'<div class="err">'+esc(err.msg)+"</div>":"")+
@@ -1054,7 +1226,7 @@ function cabecalhoObra(o,desc){
 function viewFolha(){
   var o=S.rascunho;
   if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
-  var errs=validarObra(o), tot=totalCampos();
+  var errs=validarObra(o), tot=totalCampos(o);
   var preench=tot-errs.filter(function(e){ return e.tipo==="obrigatorio"; }).length;
   var pct=Math.round(preench/tot*100);
   var mi=municipioInfo(o.municipio);
@@ -1119,7 +1291,12 @@ function viewFolha(){
     var se=errs.filter(function(e){ return e.sec===s.id; }).length;
     h+='<div class="sect" data-sect="'+s.id+'"><div class="sect-h"><h4><span class="idx">'+String(i+1).padStart(2,"0")+"</span>"+
       esc(s.titulo)+(se?' <span class="chip bad">'+se+"</span>":"")+"</h4></div>"+
-      '<div class="sect-b"><div class="fgrid">'+s.campos.map(function(c){ return campoHTML(c,o,errs); }).join("")+"</div></div></div>";
+      '<div class="sect-b">'+
+      (s.id==="empreiteira"&&can("obra.edit")?
+        '<div style="margin-bottom:10px"><button class="btn ghost sm" id="btnRepetirEmp">Repetir empreiteira da última obra</button>'+
+        '<span class="drv" style="display:inline-block;margin-left:8px">Traz todos os campos desta seção da obra gravada mais recentemente.</span></div>':"")+
+      '<div class="fgrid">'+s.campos.filter(function(c){ return visivel(c,o); })
+        .map(function(c){ return campoHTML(c,o,errs); }).join("")+"</div></div></div>";
   });
   return h+'<p class="note">As alterações só vão para o banco quando você clicar em Salvar.</p>';
 }
@@ -1170,33 +1347,35 @@ function viewTopologia(){
 
   var faltam=[];
   if(!ctx.constA||!ctx.constB) faltam.push("as constantes do município");
-  if(!ctx.demT1) faltam.push("o tipo de empreendimento e a ligação do consumidor tipo 1");
+  if(!ctx.kwh1) faltam.push("o tipo de empreendimento e a ligação do consumidor tipo 1");
   if(!ctx.caboSec) faltam.push("o cabo padrão da rede secundária");
   if(faltam.length)
     h+='<div class="consist bad"><div><strong>Faltam dados na folha</strong><div class="note">Preencha '+
        faltam.join(", ")+" para o cálculo rodar.</div></div></div>";
 
-  var kwh1=consumoAnexo1(o.atividadeT1,o.ligacaoT1), kwh2=consumoAnexo1(o.atividadeT2,o.ligacaoT2);
+  /* A demanda por consumidor depende de quantos consumidores o transformador
+     tem, então a conta é mostrada por transformador, não uma vez só. */
   h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Cálculo de demanda</h3>'+
-    '<p class="sub">kVA = (A × kWh)<sup>B</sup> — a conta está aberta para conferência contra a planilha de origem.</p></div></div>'+
-    '<div class="tbl-wrap"><table><thead><tr><th>Consumidor</th><th class="num">A</th><th class="num">B</th>'+
-    '<th class="num">kWh/mês</th><th class="num">Demanda (kVA)</th><th class="num">Qtd.</th>'+
-    '<th class="num">Total (kVA)</th></tr></thead><tbody>'+
-    [["Tipo 1",kwh1,ctx.demT1,Number(o.qtdT1)||0],["Tipo 2",kwh2,ctx.demT2,Number(o.qtdT2)||0]]
-      .filter(function(l){ return l[1]; })
-      .map(function(l){
-        return "<tr><td>"+l[0]+'</td><td class="num">'+num(ctx.constA,4)+'</td><td class="num">'+num(ctx.constB,4)+
-          '</td><td class="num">'+num(l[1],0)+'</td><td class="num"><strong>'+num(l[2],2)+
-          "</strong>"+(l[2]>10?' <span class="chip warn">conferir</span>':"")+
-          '</td><td class="num">'+num(l[3])+'</td><td class="num">'+num(l[2]*l[3],2)+"</td></tr>"; }).join("")+
-    "</tbody></table></div>"+
+    '<p class="sub">kVA<sub>S</sub> = A × (Nx × kWh)<sup>B</sup> ÷ Nx — a conta está aberta para conferência. '+
+    'Nx é o número de consumidores ligados ao transformador: quanto maior o grupo, menor a demanda de cada um.</p></div></div>'+
+    '<div class="tbl-wrap"><table><thead><tr><th>Trafo</th><th class="num">A</th><th class="num">B</th>'+
+    '<th class="num">kWh/lote</th><th class="num">Nx</th><th class="num">kVA do grupo</th>'+
+    '<th class="num">kVA<sub>S</sub> por consumidor</th><th class="num">Diurna</th><th class="num">Noturna</th>'+
+    "</tr></thead><tbody>";
+  if(!o.trafos.length)
+    h+='<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:16px">Cadastre um transformador abaixo para a conta aparecer.</td></tr>';
+  o.trafos.forEach(function(tr){
+    var d=demandaTrafo(o,tr.id), g=d.grupo;
+    h+="<tr><td><strong>"+esc(tr.id||"—")+'</strong></td><td class="num">'+num(ctx.constA,4)+
+      '</td><td class="num">'+num(ctx.constB,4)+'</td><td class="num">'+num(ctx.kwh1,0)+
+      '</td><td class="num">'+num(g.nx)+'</td><td class="num">'+num(g.total,2)+
+      '</td><td class="num"><strong>'+num(d.kvas,2)+'</strong></td><td class="num">'+num(d.diurna,2)+
+      '</td><td class="num"><strong>'+num(d.noturna,2)+"</strong></td></tr>";
+  });
+  h+="</tbody></table></div>"+
     '<div class="tbl-foot"><span>Consumo estimado do empreendimento: '+num(consumoLoteamento(o),0)+
-    " kWh/mês</span><span>Fator de potência "+num(ctx.fatorPotencia,2)+" · "+esc(o.tipoEmpreendimento||"—")+"</span></div></div>";
-  if(ctx.demT1>10)
-    h+='<div class="consist bad"><div><strong>Demanda por consumidor acima do usual</strong>'+
-       '<div class="note">'+num(ctx.demT1,2)+" kVA por consumidor tipo 1. A fórmula é a da planilha de origem, "+
-       "mas vale conferir contra uma obra já aprovada antes de seguir — "+
-       "a troca da GED 3738 pelo Anexo 1 mudou o kWh que entra na conta.</div></div></div>";
+    " kWh/mês</span><span>Fator de potência "+num(ctx.fatorPotencia,2)+" · "+esc(o.tipoEmpreendimento||"—")+
+    " · carregamento KVAN × "+num(ctx.fatorCarreg,3)+"</span></div></div>";
 
   var opsPontos=function(){ return (o.pontos||[]).map(function(p){ return [p.id,String(p.id)]; }); };
   var opsTrafos=function(){ return (o.trafos||[]).map(function(t){ return [t.id,String(t.id)]; }); };
@@ -1208,30 +1387,48 @@ function viewTopologia(){
     {k:"ponto",l:"Ponto de instalação",w:150,ops:opsPontos},
     {k:"potencia",l:"Potência (kVA)",w:120,num:1,ops:function(){
       return (((S.cat.trafos||{}).items)||[]).map(function(x){ return [x.nominal,num(x.nominal,1)+" kVA"]; }); }},
-    {l:"Demanda (kVA)",num:1,w:110,calc:function(r){
-      var d=demandaTrafo(o,r.id); return '<span class="mono">'+num(d.demanda,2)+"</span>"; }},
+    {l:"Demanda noturna (kVA)",num:1,w:140,calc:function(r){
+      var d=demandaTrafo(o,r.id); return '<span class="mono">'+num(d.noturna,2)+"</span>"; }},
     {l:"Sugerido",num:1,w:110,calc:function(r){
-      var d=demandaTrafo(o,r.id), s=dimensionarTrafo(d.demanda,o.tipoEmpreendimento);
+      var d=demandaTrafo(o,r.id), s=dimensionarTrafo(d.noturna,o.tipoEmpreendimento,ctx.fatorCarreg);
       if(!s) return "—";
       var ok=Number(r.potencia)===s.nominal;
       return '<span class="chip '+(r.potencia?(ok?"ok":"warn"):"")+'">'+num(s.nominal,1)+" kVA</span>"; }},
+    {l:"Carregamento",num:1,w:130,calc:function(r){
+      var d=demandaTrafo(o,r.id);
+      var c=carregamentoTrafo(d.noturna,r.potencia,ctx.fatorCarreg);
+      if(!c) return "—";
+      var cls=c.percentual>100?"bad":(c.percentual>90?"warn":"ok");
+      return '<span class="chip '+cls+'">'+num(c.percentual,2)+" %</span>"; }},
     {l:"Máx. cons. tipo 1",num:1,w:150,calc:function(r){
       var m=maxConsumidoresT1(o,r.id,r.potencia);
       if(m===null) return "—";
-      var d=demandaTrafo(o,r.id), atual=d.totais.consT1;
+      var d=demandaTrafo(o,r.id), atual=d.totais.consT1+d.totais.consT2;
       return '<span class="mono">'+num(atual)+" / "+num(m)+"</span>"+
         (atual>m?' <span class="chip bad">acima</span>':""); }}
   ],o.trafos,"transformador");
 
-  h+=grade("Pontos","Cargas instaladas em cada ponto da rede.","pontos",[
-    {k:"id",l:"Ponto",w:80},
+  /* A carga do ponto depende do transformador que o alimenta, porque a demanda
+     por consumidor é do grupo. Guardamos de qual circuito cada ponto veio. */
+  var kvasDoPonto={};
+  o.trafos.forEach(function(tr){
+    var c=calcularCircuito(o,tr.id);
+    if(c.raiz) kvasDoPonto[c.raiz]=c.kvas;
+    c.trechos.forEach(function(t){ kvasDoPonto[t.para]=c.kvas; });
+  });
+
+  h+=grade("Pontos","Cargas instaladas em cada ponto da rede. A letra é a designação usada no relatório de queda.","pontos",[
+    {k:"id",l:"Ponto",w:70},
+    {k:"letra",l:"Letra",w:70},
     {k:"consT1",l:"Consum. tipo 1",tipo:"number",min:0,num:1,w:110},
     {k:"consT2",l:"Consum. tipo 2",tipo:"number",min:0,num:1,w:110},
     {k:"lumT1",l:"Lumin. tipo 1",tipo:"number",min:0,num:1,w:100},
     {k:"lumT2",l:"Lumin. tipo 2",tipo:"number",min:0,num:1,w:100},
     {k:"cargaEspecial",l:"Carga especial (kVA)",tipo:"number",step:"0.01",min:0,num:1,w:140},
     {l:"Carga no ponto (kVA)",num:1,w:140,calc:function(r){
-      return '<span class="mono">'+num(cargaDoPonto(r,ctx),3)+"</span>"; }}
+      var k=kvasDoPonto[String(r.id)];
+      if(k===undefined) return '<span class="mono">—</span>';
+      return '<span class="mono">'+num(cargaDoPonto(r,ctx,k),3)+"</span>"; }}
   ],o.pontos,"ponto");
 
   h+=grade("Trechos","Ligação entre dois pontos, com comprimento e bitola.","trechos",[
@@ -1269,6 +1466,9 @@ function viewQueda(){
 
   trafos.forEach(function(tr){
     var r=calcularCircuito(o,tr.id);
+    var d=demandaTrafo(o,tr.id);
+    var carr=carregamentoTrafo(d.noturna,tr.potencia,ctx.fatorCarreg);
+    var corrente=correnteTrafo(d.noturna,ctx.tensaoNominal);
     var pior=0, fora=0, semCoef=0;
     r.trechos.forEach(function(t){
       if(t.quedaAcumulada>pior) pior=t.quedaAcumulada;
@@ -1277,41 +1477,79 @@ function viewQueda(){
     });
     h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div>'+
       "<h3>Transformador "+esc(tr.id)+(tr.potencia?" · "+num(tr.potencia,1)+" kVA":"")+"</h3>"+
-      '<p class="sub">'+r.trechos.length+" trecho"+(r.trechos.length===1?"":"s")+
-      " · carga total "+num(r.cargaTotal,2)+" kVA</p></div>"+
+      '<p class="sub">'+(r.raiz?"Instalado no ponto "+esc(r.raiz)+" · ":"")+
+      r.trechos.length+" trecho"+(r.trechos.length===1?"":"s")+"</p></div>"+
       "<div>"+(r.ciclo?'<span class="chip bad">topologia com laço</span>':
         (fora?'<span class="chip bad">'+fora+" trecho"+(fora>1?"s":"")+" acima do limite</span>":
          (r.trechos.length?'<span class="chip ok">dentro do limite · pior '+num(pior,2)+"%</span>":"")))+
       (semCoef?' <span class="chip warn">'+semCoef+" sem coeficiente de cabo</span>":"")+"</div></div>";
+
+    /* Cabeçalho igual ao do formulário da concessionária. */
+    h+='<div class="panel-b grid g4" style="gap:10px;border-bottom:1px solid var(--line-2)">'+
+      [["Consumidores",num(d.totais.consT1+d.totais.consT2)],
+       ["Luminárias",num(d.totais.lumT1+d.totais.lumT2)],
+       ["kWh por lote",ctx.kwh1?num(ctx.kwh1,0):"—"],
+       ["Demanda por lote",num(d.kvas,2)+" kVA"],
+       ["Primária",ctx.tensaoPrim?num(ctx.tensaoPrim,1)+" kV":"—"],
+       ["Secundária",ctx.tensaoNominal?num(ctx.tensaoNominal,0)+" / "+num(ctx.tensaoFN,0)+" V":"—"],
+       ["Potência do trafo",tr.potencia?num(tr.potencia,1)+" kVA":"—"],
+       ["Carregamento",carr?num(carr.percentual,2)+" % (KVAN × "+num(carr.fator,3)+")":"—"]]
+      .map(function(x){ return '<div><div style="font-size:11.5px;color:var(--muted)">'+esc(x[0])+
+        '</div><div class="mono" style="font-size:15px;margin-top:2px">'+esc(x[1])+"</div></div>"; }).join("")+"</div>";
+
     if(!r.trechos.length){
       h+='<div class="empty" style="padding:28px"><p>'+
         (r.raiz?"Nenhum trecho sai do ponto "+esc(r.raiz)+".":"Defina o ponto de instalação deste transformador.")+
         "</p></div></div>";
       return;
     }
-    h+='<div class="tbl-wrap"><table><thead><tr><th>Trecho</th><th class="num">Compr. (m)</th><th>Bitola</th>'+
-      '<th class="num">Carga local</th><th class="num">Carga a jusante</th><th class="num">Momento</th>'+
-      '<th class="num">Queda (%)</th><th class="num">Acumulada (%)</th><th class="num">Tensão (V)</th>'+
-      '<th class="num">Corrente (A)</th></tr></thead><tbody>'+
+
+    /* Colunas na ordem do formulário: trecho, carga, condutor, queda. */
+    h+='<div class="tbl-wrap"><table><thead>'+
+      '<tr><th colspan="2">Trecho</th><th colspan="3" class="num">Carga (kVA)</th>'+
+      '<th>Condutor</th><th colspan="3" class="num">Queda de tensão (%)</th>'+
+      '<th colspan="2" class="num">Verificação</th></tr>'+
+      '<tr><th>Designação</th><th class="num">Compr. (×100 m)</th>'+
+      '<th class="num">Distribuída</th><th class="num">Acumulada no fim</th><th class="num">Total (C/2+D)×B</th>'+
+      '<th>Bitola</th><th class="num">Unitária</th><th class="num">No trecho</th><th class="num">Total</th>'+
+      '<th class="num">Tensão (V)</th><th class="num">Corrente (A)</th></tr></thead><tbody>'+
       r.trechos.map(function(t){
-        return "<tr"+(t.excedeQueda?' class="fora"':"")+'><td class="mono">'+esc(t.de)+" → "+esc(t.para)+
-          (t.classificacao==="IP"?' <span class="pill">IP</span>':"")+'</td><td class="num">'+num(t.comprimento,1)+
+        return "<tr"+(t.excedeQueda?' class="fora"':"")+'><td class="mono"><strong>'+esc(t.designacao)+"</strong>"+
+          (t.classificacao==="IP"?' <span class="pill">IP</span>':"")+
+          '</td><td class="num">'+num(t.comprimento/100,2)+
+          '</td><td class="num">'+(t.cargaLocal?num(t.cargaLocal,2):"—")+
+          '</td><td class="num">'+num(t.cargaJusante,2)+
+          '</td><td class="num">'+num(t.momento,3)+
           "</td><td>"+(t.bitola?esc(t.bitola):'<span class="pill">sem bitola</span>')+
-          '</td><td class="num">'+num(t.cargaLocal,3)+'</td><td class="num">'+num(t.cargaJusante,3)+
-          '</td><td class="num">'+num(t.momento,2)+
-          '</td><td class="num">'+(t.queda===null?'<span class="pill">—</span>':num(t.queda,ctx.casas))+
+          '</td><td class="num">'+(t.coef===null?'<span class="pill">—</span>':num(t.coef,4))+
+          '</td><td class="num">'+(t.queda===null?"—":num(t.queda,ctx.casas))+
           '</td><td class="num"><strong>'+(t.queda===null?"—":num(t.quedaAcumulada,ctx.casas))+"</strong>"+
           (t.excedeQueda?' <span class="chip bad">&gt; '+num(t.limite,1)+"%</span>":"")+
           '</td><td class="num">'+(t.tensao?num(t.tensao,1):"—")+
           '</td><td class="num">'+num(t.corrente,1)+
           (t.excedeCorrente?' <span class="chip bad">&gt; '+num(t.amperagem)+" A</span>":"")+"</td></tr>"; }).join("")+
-      "</tbody></table></div></div>";
+      "</tbody></table></div>";
+
+    /* Rodapé do formulário. */
+    h+='<div class="panel-b grid g4" style="gap:10px;border-top:1px solid var(--line-2)">'+
+      [["Demanda existente",num(Number(o.demandaExistente)||0,2)+" kVA"],
+       ["Demanda projetada",num(d.noturna,2)+" kVA"],
+       ["Demanda diurna",num(d.diurna,2)+" kVA"],
+       ["Demanda noturna",num(d.noturna,2)+" kVA"+
+         (carr?" ("+num(carr.percentual,2)+" %)":"")+(corrente?" · "+num(corrente,4)+" A":"")]]
+      .map(function(x){ return '<div><div style="font-size:11.5px;color:var(--muted)">'+esc(x[0])+
+        '</div><div class="mono" style="font-size:15px;margin-top:2px">'+esc(x[1])+"</div></div>"; }).join("")+
+      "</div></div>";
   });
 
-  h+='<p class="note">Momento elétrico = ((carga local ÷ 2 + carga a jusante) × comprimento) ÷ 100. '+
-     'A carga do próprio trecho entra pela metade, por estar distribuída ao longo dele. '+
-     'A queda do trecho é o momento multiplicado pelo coeficiente do cabo na GED 3667 Tab. 4.1, '+
-     'escolhido pela tensão da rede e pelo fator de potência.</p>';
+  if(ctx.lotesTotais||ctx.lotesExistentes)
+    h+='<p class="note">Empreendimento com '+num(ctx.lotesTotais)+" lote"+(ctx.lotesTotais===1?"":"s")+
+       " no total, dos quais "+num(ctx.lotesExistentes)+" já são atendidos pela rede existente.</p>";
+
+  h+='<p class="note">Total do trecho = (carga distribuída ÷ 2 + carga acumulada no fim) × comprimento, '+
+     'com o comprimento em centenas de metros. A carga do próprio trecho entra pela metade, por estar '+
+     'distribuída ao longo dele. A queda do trecho é esse total multiplicado pela queda unitária do cabo, '+
+     'que sai da GED 3667 Tab. 4.1 pela tensão da rede e pelo fator de potência.</p>';
   return h;
 }
 
@@ -1694,7 +1932,37 @@ function editarUsuario(i){
 /* ==========================================================================
    RENDER
    ========================================================================== */
+/* Botão que precisa agir antes de o campo perder o foco.
+
+   Sair de um campo redesenha a tela, e isso acontece entre o apertar e o soltar
+   do botão: no clique o elemento já foi substituído e nada acontece. Agindo no
+   mousedown o botão responde antes. O clique continua ligado para teclado e
+   para quem aciona por script, e a janela de tempo evita a ação dobrada. */
+var ultimoAcionamento={chave:"",quando:0};
+function aoAcionar(el,fn,chave){
+  var k=chave||el.id||el.getAttribute("data-aba")||el.textContent||"";
+  var h=function(e){
+    var agora=Date.now();
+    // Só ignora a repetição do mesmo botão; outro botão age normalmente.
+    if(ultimoAcionamento.chave===k&&agora-ultimoAcionamento.quando<350) return;
+    ultimoAcionamento={chave:k,quando:agora};
+    if(e.preventDefault) e.preventDefault();
+    fn(e);
+  };
+  el.addEventListener("mousedown",h);
+  el.addEventListener("click",h);
+}
+
+/* Trocar o HTML tira o foco do campo que estava aberto, e isso dispara o blur,
+   que chama render de novo no meio da troca. A trava abaixo faz a chamada de
+   dentro ser ignorada: quem está desenhando já vai mostrar o estado mais novo. */
+var desenhando=false;
 function render(){
+  if(desenhando) return;
+  desenhando=true;
+  try{ desenhar(); } finally { desenhando=false; }
+}
+function desenhar(){
   var app=document.getElementById("app");
   if(!S.ready){ app.innerHTML='<div class="loading">Carregando…</div>'; return; }
   if(!S.sess){ app.innerHTML=viewLogin(); ligarLogin(); return; }
@@ -1723,6 +1991,18 @@ async function irPara(destino){
   if(destino==="registro"){ await lerLog(); }
   render();
 }
+/* Põe o foco no campo que o Enter escolheu, depois que a tela foi redesenhada. */
+function focarGuardado(){
+  var k=S.focoCampo;
+  if(!k) return;
+  S.focoCampo=null;
+  var alvo=(k==="__salvar")?document.getElementById("btnSalvar")
+                           :document.querySelector('.sect-b [data-k="'+k+'"]:not([disabled])');
+  if(!alvo||alvo.disabled) return;
+  alvo.focus();
+  if(alvo.select) try{ alvo.select(); }catch(e){}
+}
+
 function ligarEventos(){
   document.querySelectorAll(".rail .grp").forEach(function(gh){
     gh.addEventListener("click",function(){
@@ -1754,6 +2034,18 @@ function ligarEventos(){
   var nova=document.getElementById("btnNovaObra");
   if(nova) nova.addEventListener("click",async function(){
     var o=Object.assign({_id:uid(),criadoEm:new Date().toISOString(),criadoPor:S.sess.nome},PADROES);
+    /* A empreiteira costuma ser sempre a mesma, então já vem preenchida da obra
+       anterior. O usuário pode trocar qualquer campo depois. */
+    var fonte=null, melhor="";
+    S.obras.forEach(function(x){
+      if(!x.empreiteira) return;
+      var q=x.atualizadoEm||x.criadoEm||"";
+      if(!fonte||q>melhor){ fonte=x; melhor=q; }
+    });
+    if(fonte) FD.forEach(function(s){
+      if(s.id!=="empreiteira") return;
+      s.campos.forEach(function(c){ if(fonte[c.k]!==undefined&&fonte[c.k]!=="") o[c.k]=fonte[c.k]; });
+    });
     try{ await Store.salvarObra(o); }catch(e){ return toast(e.message); }
     S.obras.push(o);
     await Store.registrar("Criou obra",o._id,"Nova obra");
@@ -1779,7 +2071,8 @@ function ligarEventos(){
 
   // abas da obra — o rascunho segue aberto, não precisa confirmar nada
   document.querySelectorAll("[data-aba]").forEach(function(b){
-    b.addEventListener("click",function(){ S.route=b.getAttribute("data-aba"); render(); }); });
+    aoAcionar(b,function(){ S.route=b.getAttribute("data-aba"); render(); });
+  });
 
   // grades de topologia
   document.querySelectorAll("[data-add]").forEach(function(b){
@@ -1825,7 +2118,9 @@ function ligarEventos(){
   });
 
   var bs=document.getElementById("btnSalvar");
-  if(bs) bs.addEventListener("click",async function(){ render(); await salvarFolha(); render(); });
+  if(bs) aoAcionar(bs,async function(){
+    if(bs.disabled) return;
+    render(); await salvarFolha(); render(); });
   var bd=document.getElementById("btnDescartar");
   if(bd) bd.addEventListener("click",function(){
     modal("Descartar alterações","<p>As alterações feitas desde a última gravação serão perdidas.</p>",function(){
@@ -1841,13 +2136,28 @@ function ligarEventos(){
       var o=S.rascunho;
       if(!o) return;
       var k=inp.getAttribute("data-k"), v=inp.value;
-      if(inp.type==="number") v=v===""?"":Number(v);
-      o[k]=v;
-      if(k==="municipio"||k==="municipioCli"||k==="munEmp") sincronizarDerivados(o);
-      if(ev==="change"||inp.type==="date"){ render(); }
+      if(inp.getAttribute("data-data")){
+        // Data digitada: vai pondo as barras e grava em AAAA-MM-DD.
+        var pos=inp.selectionStart, antes=v;
+        v=mascaraData(v);
+        if(v!==antes){ inp.value=v; try{ inp.setSelectionRange(pos+(v.length-antes.length),pos+(v.length-antes.length)); }catch(e){} }
+        o[k]=dataISO(v);
+      } else {
+        if(inp.type==="number") v=v===""?"":Number(v);
+        o[k]=v;
+      }
+      var ehMunicipio=(k==="municipio"||k==="municipioCli"||k==="munEmp");
+      if(ehMunicipio) sincronizarDerivados(o);
+      /* Município virou campo de digitação. Escolher da lista de sugestões não
+         dispara "change" em todo navegador, então quando o nome digitado bate
+         com um do cadastro a tela é redesenhada na hora, para as constantes
+         aparecerem sem precisar sair do campo. */
+      if(ehMunicipio&&municipioInfo(v)){ S.focoCampo=k; render(); return; }
+      if(ev==="change"){ render(); }
       else{
         var pend=validarObra(o), barra=document.querySelector(".consist .bar i");
-        if(barra) barra.style.width=Math.round((totalCampos()-pend.filter(function(e){return e.tipo==="obrigatorio";}).length)/totalCampos()*100)+"%";
+        var tc=totalCampos(o);
+        if(barra) barra.style.width=Math.round((tc-pend.filter(function(e){return e.tipo==="obrigatorio";}).length)/tc*100)+"%";
         var bar=document.querySelector(".salvabar");
         if(bar&&!bar.classList.contains("sujo")){
           bar.classList.add("sujo");
@@ -1856,8 +2166,15 @@ function ligarEventos(){
         }
       }
     });
-    inp.addEventListener("blur",function(){
+    inp.addEventListener("blur",function(e){
       if(inp.tagName==="SELECT") return;
+      /* Sair de um campo redesenha a tela para atualizar os painéis derivados,
+         e o redesenho troca o campo que acabou de receber o foco. Sem isto,
+         quem sai de um campo clicando no seguinte digita no vazio. Guardamos
+         para onde o foco estava indo e o devolvemos depois do redesenho. */
+      var indo=e&&e.relatedTarget;
+      if(indo&&indo.getAttribute&&indo.getAttribute("data-k"))
+        S.focoCampo=indo.getAttribute("data-k");
       // Campo numérico não formata, mas precisa redesenhar os painéis derivados.
       if(inp.type==="number"){ render(); return; }
       var o=S.rascunho; if(!o) return;
@@ -1869,6 +2186,44 @@ function ligarEventos(){
       }
       render();
     });
+
+    /* Enter anda para o campo seguinte, como o Tab. Quem preenche a folha
+       inteira no teclado não precisa trocar de tecla no meio.
+
+       Sair do campo redesenha a tela, o que apagaria o foco recém-posto. Por
+       isso guardamos para onde ir e o foco é devolvido depois do redesenho. */
+    inp.addEventListener("keydown",function(e){
+      if(e.key!=="Enter"||e.shiftKey) return;
+      if(inp.tagName==="TEXTAREA") return;
+      e.preventDefault();
+      var campos=Array.prototype.slice.call(
+        document.querySelectorAll(".sect-b [data-k]:not([disabled])"));
+      var alvo=campos[campos.indexOf(inp)+1];
+      S.focoCampo=alvo?alvo.getAttribute("data-k"):"__salvar";
+      /* Sair do campo dispara o redesenho, e redesenhar no meio do evento de
+         teclado quebra o DOM. Por isso o blur só acontece depois que o evento
+         termina; o foco é posto no fim do redesenho. */
+      setTimeout(function(){ inp.blur(); if(S.focoCampo) focarGuardado(); },0);
+    });
+  });
+  focarGuardado();
+
+  /* Repete os dados da empreiteira da obra gravada mais recentemente. */
+  var bre=document.getElementById("btnRepetirEmp");
+  if(bre) bre.addEventListener("click",function(){
+    var o=S.rascunho; if(!o) return;
+    var campos=[]; FD.forEach(function(s){ if(s.id==="empreiteira") campos=s.campos.map(function(c){ return c.k; }); });
+    var fonte=null, melhor="";
+    S.obras.forEach(function(x){
+      if(x._id===o._id||!x.empreiteira) return;
+      var q=x.atualizadoEm||"";
+      if(!fonte||q>melhor){ fonte=x; melhor=q; }
+    });
+    if(!fonte) return toast("Nenhuma outra obra com empreiteira preenchida ainda.");
+    campos.forEach(function(k){ if(fonte[k]!==undefined) o[k]=fonte[k]; });
+    sincronizarDerivados(o);
+    render();
+    toast("Empreiteira trazida de "+(fonte.empreendimento||"obra anterior")+".");
   });
 
   document.querySelectorAll("[data-rev]").forEach(function(b){
