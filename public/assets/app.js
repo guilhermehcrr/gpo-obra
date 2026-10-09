@@ -38,10 +38,14 @@ function toast(m){ var t=el('<div class="toast">'+esc(m)+"</div>"); document.bod
 async function sha(s){ var b=new TextEncoder().encode(s); var h=await crypto.subtle.digest("SHA-256",b);
   return Array.from(new Uint8Array(h)).map(function(x){return x.toString(16).padStart(2,"0");}).join(""); }
 function items(k){ var c=S.cat[k]; return (c&&c.items)||[]; }
+/* Lista que um cadastro da tela mostra. A maioria fica em "items"; alguns
+   catálogos guardam mais de uma lista (postes: capacidades e geometria). */
+function listaTab(cfg){ var c=S.cat[cfg.cat]; return (c&&c[cfg.campo||"items"])||[]; }
+function gravarListaTab(cfg,lista){ S.cat[cfg.cat]=S.cat[cfg.cat]||{}; S.cat[cfg.cat][cfg.campo||"items"]=lista; }
 function revisaoDe(k){ var c=S.cat[k]; return (c&&c.revisao)||null; }
 function rotuloRevisao(k){ var r=revisaoDe(k); return r&&r.versao?r.versao:"não informada"; }
 // Tabelas cuja revisão é carimbada na obra, porque entram no cálculo ou no memorial.
-var TABELAS_NORMATIVAS=["anexo1","cabos_qt","trafos","luminarias","empreendimentos","estruturas","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
+var TABELAS_NORMATIVAS=["anexo1","cabos_qt","trafos","luminarias","empreendimentos","estruturas","tracao","postes","estruturas_rc","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
 function revisoesAtuais(){
   var o={};
   TABELAS_NORMATIVAS.forEach(function(k){ var r=revisaoDe(k); if(r&&r.versao) o[k]=r.versao; });
@@ -58,7 +62,7 @@ function revisoesDefasadas(obra){
 }
 var NOME_TABELA={anexo1:"Anexo 1 — previsão de consumo",
   cabos_qt:"Cabos — queda de tensão",trafos:"Transformadores",luminarias:"Luminárias",
-  empreendimentos:"Tipos de empreendimento",estruturas:"Estruturas por ângulo",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
+  empreendimentos:"Tipos de empreendimento",estruturas:"Estruturas por ângulo",tracao:"Tração de cabos — GED 3648",postes:"Postes — capacidade e geometria",estruturas_rc:"Estruturas da rede compacta",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
   padroes:"Padrões de instalação",especificacoes:"Especificações técnicas",
   fornecedores_aprovados:"Fornecedores aprovados",cintas:"Diâmetro de poste e cintas",cabos:"Dados técnicos de cabos"};
 function initials(n){ return (n||"?").split(/\s+/).slice(0,2).map(function(w){return w[0];}).join("").toUpperCase(); }
@@ -107,7 +111,8 @@ function storePrevia(DB){
     especificacoes:"normativas/especificacoes", fornecedores_aprovados:"normativas/fornecedores_aprovados",
     anexo1:"normativas/anexo1", ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos",
     cabos_qt:"normativas/cabos_qt", trafos:"normativas/trafos", luminarias:"normativas/luminarias",
-    empreendimentos:"normativas/empreendimentos", estruturas:"normativas/estruturas" };
+    empreendimentos:"normativas/empreendimentos", estruturas:"normativas/estruturas",
+    tracao:"normativas/tracao", postes:"normativas/postes", estruturas_rc:"normativas/estruturas_rc" };
   var usuariosCache = [];
   return {
     tipo:"previa",
@@ -562,6 +567,359 @@ function maxConsumidoresT1(obra,trafoId,potenciaNominal){
 }
 
 /* ==========================================================================
+   ESFORÇO MECÂNICO (GED 3648)
+
+   Cada vão que chega ao poste puxa o topo com a tração dos cabos que carrega.
+   Essa tração é reduzida a uma força equivalente aplicada a 0,20 m do topo:
+
+     F = tração × altura do cabo ÷ altura livre do poste
+
+   As forças dos vãos são somadas duas a duas, pelo ângulo entre elas:
+
+     R1 = √(F1² + F2² + 2·F1·F2·cos α)              α = ângulo vão 1–vão 2
+     R2 = √(R1² + F3² + 2·R1·F3·cos β)              β = ângulo vão 2–vão 3 + ângulo entre R1 e F2
+     R3 = √(R2² + F4² + 2·R2·F4·cos γ)              γ = ângulo vão 3–vão 4 + ângulo entre R2 e F3
+
+   A resultante é a última que existir (F1, R1, R2 ou R3) e o poste é o de menor
+   capacidade nominal cuja capacidade útil — nominal × tolerância — a comporta.
+   Tudo segue a aba ESFORÇO MECÂNICO da planilha de origem, colunas CP a DJ, U e V.
+   ========================================================================== */
+
+/* Tração de projeto do cabo, em kgf, pela tabela da GED 3648.
+   A planilha procura pela combinação cabo + UF + classe de tensão + vão básico. */
+function tracaoCabo(tag,uf,kv,vao){
+  if(tag===null||tag===undefined||tag==="") return null;
+  var t=String(tag), r=null;
+  items("tracao").some(function(x){
+    if(String(x.tag)===t&&x.uf===uf&&Number(x.kv)===Number(kv)&&Number(x.vao)===Number(vao)){ r=x.tracao; return true; }
+    return false;
+  });
+  return r;
+}
+
+/* Tag do cabo secundário multiplexado na GED 3648 a partir da bitola do trecho.
+   16 mm² é 10, 25 é 20, 35 é 30, 50 é 50, 70 é 70, 120 é 120. O último dígito
+   das tags (50, 51, 52) não muda a tração, então usamos a terminada em zero. */
+function tagSecundario(bitola){
+  if(bitola===null||bitola===undefined||bitola==="") return null;
+  var alvo="SEC. "+String(bitola).trim()+"mm²", r=null;
+  items("tracao").some(function(x){
+    if(x.tipo==="1-MULTIPLEXADO"&&x.bitola===alvo&&/0$/.test(String(x.tag))){ r=String(x.tag); return true; }
+    return false;
+  });
+  return r;
+}
+
+/* Cabos primários disponíveis na GED 3648 para a UF, a classe de tensão e o vão da obra. */
+function cabosPrimariosGed(uf,kv,vao){
+  var vistos={}, l=[];
+  items("tracao").forEach(function(x){
+    if(x.tipo==="1-MULTIPLEXADO") return;
+    if(x.uf!==uf||Number(x.kv)!==Number(kv)||Number(x.vao)!==Number(vao)) return;
+    if(vistos[x.tag]) return;
+    vistos[x.tag]=1; l.push(x);
+  });
+  return l;
+}
+
+/* A folha de dados guarda o cabo primário pelo nome comercial. Quando ele é
+   também uma tag da GED 3648 (E35, E70), serve direto; nos demais casos o
+   projetista escolhe a tag na aba de esforço mecânico. */
+function tagPrimarioDaFolha(cabo){
+  if(!cabo) return null;
+  var c=String(cabo).trim(), achou=false;
+  items("tracao").some(function(x){ if(String(x.tag)===c){ achou=true; return true; } return false; });
+  return achou?c:null;
+}
+
+/* A planilha testa "cabo de rede compacta" de dois jeitos: para a altura do
+   poste olha o cabo junto com a classe de tensão (coluna T); para as regras de
+   capacidade olha só o cabo (coluna V). Os dois testes ficam separados aqui. */
+function ehCaboCompacto(tag,kv){
+  var l=(S.cat.postes&&S.cat.postes.cabosCompactos)||[];
+  return l.some(function(x){ return String(x.tag)===String(tag)&&Number(x.kv)===Number(kv); });
+}
+function ehTagCompacta(tag){
+  var l=(S.cat.postes&&S.cat.postes.cabosCompactos)||[];
+  return l.some(function(x){ return String(x.tag)===String(tag); });
+}
+
+/* Geometria do poste pela altura: engastamento, altura livre e altura dos cabos. */
+function geometriaPoste(altura){
+  var g=(S.cat.postes&&S.cat.postes.geometria)||[], r=null;
+  g.forEach(function(x){ if(Number(x.altura)===Number(altura)) r=x; });
+  return r;
+}
+
+/* Capacidades nominais em ordem crescente, com a capacidade útil de cada uma. */
+function capacidadesPoste(){
+  return (((S.cat.postes||{}).capacidades)||[]).map(function(c){
+    return {nominal:Number(c.nominal), tolerancia:Number(c.tolerancia), util:Number(c.nominal)*Number(c.tolerancia)};
+  }).sort(function(a,b){ return a.nominal-b.nominal; });
+}
+
+/* Menor capacidade cuja capacidade útil comporta a resultante.
+   Na planilha é o PROCX da resultante na coluna V, devolvendo a coluna W. */
+function capacidadeParaResultante(R){
+  var r=null;
+  capacidadesPoste().some(function(c){ if(R<=c.util+1e-9){ r=c; return true; } return false; });
+  return r;
+}
+function capacidadeNominal(n){
+  var r=null; capacidadesPoste().forEach(function(c){ if(c.nominal===Number(n)) r=c; }); return r;
+}
+function posteExiste(altura,nominal){
+  var d=((S.cat.postes||{}).disponiveis)||[], ok=false;
+  d.forEach(function(x){ if(Number(x.altura)===Number(altura)&&(x.nominais||[]).indexOf(Number(nominal))>=0) ok=true; });
+  return ok;
+}
+function nomePoste(altura,nominal){
+  return String(altura).replace(".",",")+"/"+(Number(nominal)/100);
+}
+
+/* Contexto do esforço mecânico: o que vale para todos os postes da obra. */
+function contextoMecanico(obra){
+  var mi=municipioInfo(obra.municipio);
+  var par=(S.cat.postes&&S.cat.postes.parametros)||{};
+  var uf=mi?mi.uf:null, kv=mi?mi.classe15_25:null, vao=Number(obra.vaoBasico)||null;
+  return {
+    uf:uf, kv:kv, vao:vao,
+    caboPrim: obra.caboPrimarioMec||tagPrimarioDaFolha(obra.caboPrimario),
+    alturaSec: Number(obra.alturaPosteSec)||Number(par.alturaSecundario)||9,
+    alturaPrim: Number(obra.alturaPostePrim)||Number(par.alturaPrimario)||11,
+    angMax9: Number(par.anguloMax9de200)||20
+  };
+}
+
+/* Vãos que chegam ao poste, na ordem em que entram na conta.
+
+   A planilha preenche os vãos primários primeiro (vão 1 recebe o primário se o
+   poste tem ao menos um, vão 2 se tem dois, e assim por diante) e depois os só
+   secundários. Mantemos essa ordem para os ângulos baterem com os da planilha.
+   O trecho "Primária" da topologia carrega primário e secundário juntos, como o
+   "Prim./Sec." da planilha; mergulho não puxa o poste. */
+function vaosDoPoste(obra,pontoId,ctx){
+  var id=String(pontoId), prim=[], sec=[];
+  (obra.trechos||[]).forEach(function(t,i){
+    if(!t.de||!t.para) return;
+    var lado=String(t.de)===id?"de":(String(t.para)===id?"para":null);
+    if(!lado) return;
+    if(t.classificacao==="M") return;
+    var outro=lado==="de"?String(t.para):String(t.de);
+    var temPrim=t.classificacao==="P";
+    var bitola=t.bitola||(obra.caboSecundario||null);
+    var tagSec=(t.classificacao==="N")?null:tagSecundario(bitola);
+    var v={indice:i, trecho:t, outro:outro, comprimento:Number(t.comprimento)||0,
+           prim:temPrim?ctx.caboPrim:null, temPrim:temPrim, bitola:bitola, sec:tagSec,
+           semTagSec:(!tagSec&&t.classificacao!=="N"&&!!bitola)};
+    (temPrim?prim:sec).push(v);
+  });
+  return prim.concat(sec);
+}
+
+/* Faixa de deflexão da estrutura primária da rede compacta.
+
+   Reproduz a chave da coluna DU: com um só vão primário é fim de linha; com dois,
+   a faixa sai de |ângulo − 180|. Com três ou mais a planilha sempre cai na faixa
+   zero, porque a condição dela é verdadeira sempre que há três primários — o
+   comportamento foi mantido para o resultado bater com o da planilha. */
+function faixaDeflexao(nPrim,anguloVao12){
+  if(nPrim===1) return "FL";
+  if(nPrim>=3) return "0";
+  if(nPrim!==2) return null;
+  if(anguloVao12===null||anguloVao12===undefined||anguloVao12==="") return null;
+  var d=Math.abs(Number(anguloVao12)-180);
+  if(d===0) return "0";
+  if(d<=6) return "6";
+  if(d<=30) return "30";
+  if(d<=60) return "60";
+  if(d<=135) return "135";
+  return null;
+}
+
+/* Linha da tabela de estruturas da rede compacta para o poste. */
+function estruturaCompacta(nPrim,faixa,equipamento){
+  if(!nPrim||!faixa) return null;
+  var eq=equipamento?String(equipamento).replace(".",","):"X", r=null;
+  items("estruturas_rc").some(function(x){
+    if(x.equipamento===eq&&x.variante==="X"&&x.primarios===nPrim&&String(x.faixa)===String(faixa)&&!x.igual){ r=x; return true; }
+    return false;
+  });
+  return r;
+}
+
+/* Soma vetorial das forças dos vãos, exatamente como as colunas DC a DJ. */
+function resultanteMecanica(F,ang){
+  var F1=F[0]||0, F2=F[1]||0, F3=F[2]||0, F4=F[3]||0;
+  var temR=ang[1]!==null&&ang[1]!==undefined&&ang[1]!=="";
+  var temS=ang[2]!==null&&ang[2]!==undefined&&ang[2]!=="";
+  var rad=function(g){ return g*Math.PI/180; };
+  var acosG=function(x){ return Math.acos(Math.max(-1,Math.min(1,x)))*180/Math.PI; };
+  var alfa=Number(ang[0])||0;
+  var R1=F2===0?0:Math.sqrt(F1*F1+F2*F2+2*F1*F2*Math.cos(rad(alfa)));
+  var beta=0;
+  if(temR&&F1!==0&&F2!==0&&R1>0) beta=Number(ang[1])+acosG((R1*R1+F2*F2-F1*F1)/(2*R1*F2));
+  var R2=(F3===0||!temR)?0:Math.sqrt(R1*R1+F3*F3+2*R1*F3*Math.cos(rad(beta)));
+  var gama=0;
+  if(temS&&F3!==0&&R2>0) gama=Number(ang[2])+acosG((R2*R2+F3*F3-R1*R1)/(2*F3*R2));
+  var R3=(F4===0||!temS)?0:Math.sqrt(R2*R2+F4*F4+2*R2*F4*Math.cos(rad(gama)));
+  // A resultante é a do último vão existente, como na coluna U.
+  var R=null;
+  if(F1!==0&&F2===0&&F3===0&&F4===0) R=F1;
+  else if(F1!==0&&F2!==0&&F3===0&&F4===0) R=R1;
+  else if(F1!==0&&F2!==0&&F3!==0&&F4===0) R=R2;
+  else if(F1!==0&&F2!==0&&F3!==0&&F4!==0) R=R3;
+  else if(F1===0&&F2===0&&F3===0&&F4===0) R=0;
+  return {R:R, R1:R1, R2:R2, R3:R3, alfa:alfa, beta:beta, gama:gama};
+}
+
+/* Cálculo completo de um poste. */
+function calcularPoste(obra,ponto,ctx){
+  var p=ponto, id=String(p.id), alertas=[];
+  var vaos=vaosDoPoste(obra,id,ctx);
+  if(!vaos.length) return {id:id, ponto:p, vaos:[], vazio:true, alertas:[]};
+  if(vaos.length>4) alertas.push("Mais de 4 vãos no poste: a conta considera só os 4 primeiros.");
+  vaos=vaos.slice(0,4);
+  var nPrim=vaos.filter(function(v){ return v.temPrim; }).length;
+  var temSec=vaos.some(function(v){ return !!v.sec; });
+
+  // Ângulos entre vãos. Com dois vãos e nada digitado, vale 180 (alinhados),
+  // que é o padrão da planilha. Com três ou quatro, o ângulo precisa ser informado.
+  var angs=[p.ang12,p.ang23,p.ang34].map(function(a){ return (a===""||a===undefined||a===null)?null:Number(a); });
+  if(vaos.length===2&&angs[0]===null) angs[0]=180;
+  var faltaAng=false;
+  if(vaos.length>=2&&angs[0]===null){ faltaAng=true; alertas.push("Informe o ângulo entre o vão 1 e o vão 2."); }
+  if(vaos.length>=3&&angs[1]===null){ faltaAng=true; alertas.push("Informe o ângulo entre o vão 2 e o vão 3."); }
+  if(vaos.length>=4&&angs[2]===null){ faltaAng=true; alertas.push("Informe o ângulo entre o vão 3 e o vão 4."); }
+
+  // Equipamento: por enquanto só o transformador, que muda a estrutura primária.
+  var trafo=null;
+  (obra.trafos||[]).forEach(function(t){ if(String(t.ponto)===id) trafo=t; });
+  var equipamento=trafo&&trafo.potencia?String(trafo.potencia):null;
+
+  // Estrutura primária da rede compacta e o que ela impõe ao poste.
+  var compacto=nPrim>0&&!!ctx.caboPrim&&ehTagCompacta(ctx.caboPrim);
+  var compactoKv=nPrim>0&&!!ctx.caboPrim&&ehCaboCompacto(ctx.caboPrim,ctx.kv);
+  var faixa=nPrim>0?faixaDeflexao(nPrim,angs[0]):null;
+  var est=compacto?estruturaCompacta(nPrim,faixa,equipamento):null;
+  if(compacto&&!est&&(angs[0]!==null||nPrim===1))
+    alertas.push(trafo?"Poste de transformador com deflexão fora das faixas da rede compacta (até 30°).":
+                       "Deflexão fora das faixas da rede compacta: sem estrutura primária na tabela.");
+
+  // Altura do poste: a escolhida no ponto ou a regra da planilha (coluna T).
+  var alturaAuto;
+  if(nPrim===0) alturaAuto=ctx.alturaSec;
+  else if(ctx.alturaPrim===12) alturaAuto=12;
+  else if(!compactoKv) alturaAuto=11;
+  else alturaAuto=est?Number(est.altura):11;
+  var altura=Number(p.alturaPoste)||alturaAuto;
+  var geo=geometriaPoste(altura);
+  if(!geo){ alertas.push("Altura de "+String(altura).replace(".",",")+" m sem geometria na tabela de postes."); }
+  else if(nPrim>0&&!geo.primario)
+    alertas.push("Poste de "+String(altura).replace(".",",")+" m não tem altura de primário na tabela: o primário não entra na força.");
+
+  // Tração de cada cabo.
+  var semTracao=[];
+  var tr=function(tag){
+    var v=tracaoCabo(tag,ctx.uf,ctx.kv,ctx.vao);
+    if(v===null&&tag) semTracao.push(tag);
+    return v;
+  };
+  if(nPrim>0&&!ctx.caboPrim) alertas.push("Escolha o cabo primário da GED 3648 nos parâmetros acima.");
+  vaos.forEach(function(v){ if(v.semTagSec) alertas.push("A bitola "+v.bitola+" do vão "+v.trecho.de+"–"+v.trecho.para+" não tem tag de cabo multiplexado na GED 3648."); });
+
+  // Estai cruzeta-poste ou poste-poste: soma a tração do cabo do estai à força do vão 1,
+  // na altura do estai (coluna CU, termo da chave EE).
+  var temEstai=(p.estai==="ECP"||p.estai==="EPP");
+  var caboEstai=temEstai?(p.caboEstai||ctx.caboPrim):null;
+
+  // Forças dos vãos, reduzidas ao topo.
+  var especifico=p.calcEspecifico==="Sim";
+  var F=[0,0,0,0], detalhe=[];
+  if(geo){
+    var hPrim=geo.primario||0;
+    var hSec=geo.secundario-((Number(altura)===9&&temEstai&&caboEstai&&tracaoCabo(caboEstai,ctx.uf,ctx.kv,ctx.vao)!==null)?0.2:0);
+    vaos.forEach(function(v,i){
+      var tP=v.prim?tr(v.prim):null, tS=v.sec?tr(v.sec):null;
+      var parcP=(tP===null)?0:hPrim/geo.livre*tP;
+      var parcS=(tS===null)?0:hSec/geo.livre*tS;
+      var parcE=0, tE=null;
+      if(i===0&&temEstai&&caboEstai){ tE=tr(caboEstai); parcE=(tE===null)?0:geo.estai/geo.livre*tE; }
+      var soma=parcP+parcS+parcE;
+      // Cálculo específico: a tração é proporcional ao vão real sobre o vão básico (colunas J3/N1).
+      var fator=(especifico&&ctx.vao)?v.comprimento/ctx.vao:1;
+      F[i]=soma*fator;
+      detalhe.push({tracaoPrim:tP, tracaoSec:tS, tracaoEstai:tE, parcPrim:parcP, parcSec:parcS, parcEstai:parcE, fator:fator, F:F[i]});
+    });
+  }
+  if(semTracao.length){
+    var lista=semTracao.filter(function(x,i){ return semTracao.indexOf(x)===i; }).join(", ");
+    alertas.push("Sem tração na GED 3648 para "+lista+" com UF "+(ctx.uf||"—")+", "+(ctx.kv||"—")+
+      " kV e vão básico de "+(ctx.vao||"—")+" m.");
+  }
+
+  // Sem o ângulo a composição não tem como ser feita: a planilha pede o valor
+  // ("◄Insira") e não escolhe poste. Aqui a resultante fica em branco.
+  var res=faltaAng?{R:null,R1:null,R2:null,R3:null,alfa:null,beta:null,gama:null}:resultanteMecanica(F,angs);
+
+  // Escolha do poste, na ordem das condições da coluna V.
+  var poste=null, regra="";
+  var R=res.R;
+  var calc=(R===null)?null:capacidadeParaResultante(R);
+  if(R!==null&&!calc) alertas.push("Resultante de "+num(R,1)+" kgf acima do maior poste da tabela. Rever a estrutura ou estaiar.");
+  var c200=capacidadeNominal(200), c400=capacidadeNominal(400);
+  var sec1=vaos[0]&&vaos[0].sec, sec2=vaos[1]&&vaos[1].sec, sec3=vaos[2]&&vaos[2].sec;
+  var doisSec=!!(sec1&&sec2&&!sec3);
+  var desvio=angs[0]===null?null:Math.abs(angs[0]-180);
+  var semAng23=angs[1]===null;
+  var tem120=vaos.some(function(v){ return v.sec&&String(v.sec).slice(0,2)==="12"; });
+  var ambos120=doisSec&&/^12[01]$/.test(String(sec1))&&/^12[01]$/.test(String(sec2));
+  var minEst=est?Number(est.capacidadeMin):null;
+  if(R!==null&&calc&&geo){
+    if(doisSec&&altura===9&&desvio!==null&&desvio<=ctx.angMax9&&semAng23&&ambos120&&c200&&R<=c200.util){
+      poste=200; regra="9 m com dois vãos de 120 mm² alinhados até "+ctx.angMax9+"°: 9/2.";
+    } else if(doisSec&&altura===9&&desvio!==null&&desvio>ctx.angMax9&&semAng23&&c400&&R<=c400.util){
+      poste=400; regra="9 m em ângulo acima de "+ctx.angMax9+"°: mínimo 9/4.";
+    } else if(altura===12&&c200&&R<=c200.util){
+      poste=400; regra="12 m: mínimo 400 daN.";
+    } else if((nPrim===0||!compacto)&&tem120&&calc.nominal===200){
+      poste=400; regra="Secundário de 120 mm²: mínimo 400 daN.";
+    } else if(nPrim>0&&!compacto){
+      poste=calc.nominal; regra="Primário fora da rede compacta: capacidade calculada.";
+    } else if(altura===9||nPrim===0){
+      poste=calc.nominal; regra="Capacidade calculada pela resultante.";
+    } else if(minEst!==null&&minEst>=calc.nominal){
+      poste=minEst; regra="Mínimo da estrutura "+est.estrutura.CPFL+": "+minEst+" daN.";
+    } else if(minEst!==null){
+      poste=calc.nominal; regra="Capacidade calculada, acima do mínimo da estrutura.";
+    }
+  }
+  if(poste&&!posteExiste(altura,poste))
+    alertas.push("Não há poste de "+String(altura).replace(".",",")+" m com "+poste+" daN na tabela de postes disponíveis.");
+
+  // Estrutura secundária pelo ângulo entre os dois primeiros vãos.
+  var estSec=null;
+  if(temSec){
+    if(vaos.length===1) estSec="IF";
+    else if(angs[0]!==null){ var es=estruturaPorAngulo(angs[0],"secundaria"); estSec=es?es.estrutura:null; }
+  }
+
+  return {id:id, ponto:p, vaos:vaos, nPrim:nPrim, angulos:angs, altura:altura, alturaAuto:alturaAuto,
+          geo:geo, F:F, detalhe:detalhe, res:res, R:R, calc:calc, poste:poste,
+          nome:poste?nomePoste(altura,poste):null, regra:regra, faixa:faixa,
+          estruturaPrim:est?est.estrutura.CPFL:null, estruturaInfo:est, estruturaSec:estSec,
+          compacto:compacto, especifico:especifico, estai:temEstai?p.estai:null, caboEstai:caboEstai,
+          alertas:alertas};
+}
+
+/* Todos os postes da obra que têm algum vão. */
+function calcularEsforcos(obra){
+  var ctx=contextoMecanico(obra);
+  return {ctx:ctx, postes:(obra.pontos||[]).map(function(p){ return calcularPoste(obra,p,ctx); })
+    .filter(function(r){ return !r.vazio; })};
+}
+
+/* ==========================================================================
    FOLHA DE DADOS — esquema e regras
    ========================================================================== */
 var FD=[
@@ -926,7 +1284,18 @@ var MENU=[
    {r:"especificacoes",l:"Especificações técnicas",c:"especificacoes"},
    {r:"aprovados",l:"Fornecedores aprovados",c:"fornecedores_aprovados"},
    {r:"cabos",l:"Dados técnicos de cabos",c:"cabos"},
-   {r:"cintas",l:"Diâmetro de poste e cintas",c:"cintas"}]},
+   {r:"cintas",l:"Diâmetro de poste e cintas",c:"cintas"},
+   {r:"cabos_qt",l:"Cabos — queda de tensão",c:"cabos_qt"},
+   {r:"trafos",l:"Transformadores",c:"trafos"},
+   {r:"luminarias",l:"Luminárias",c:"luminarias"},
+   {r:"empreendimentos",l:"Tipos de empreendimento",c:"empreendimentos"},
+   {r:"est_sec",l:"Estruturas secundárias por ângulo",c:"estruturas"},
+   {r:"est_prim",l:"Estruturas primárias por ângulo",c:"estruturas"},
+   {r:"tracao",l:"Tração de cabos — GED 3648",c:"tracao"},
+   {r:"postes_cap",l:"Postes — capacidade útil",c:"postes"},
+   {r:"postes_geo",l:"Postes — geometria",c:"postes"},
+   {r:"postes_disp",l:"Postes — alturas disponíveis",c:"postes"},
+   {r:"estruturas_rc",l:"Estruturas da rede compacta",c:"estruturas_rc"}]},
  {grp:"Administração",itens:[{r:"usuarios",l:"Usuários e perfis"},{r:"registro",l:"Registro de operações"}]}
 ];
 function grupoPorNome(n){ var r=null; MENU.forEach(function(g){ if(g.grp===n) r=g; }); return r; }
@@ -944,7 +1313,7 @@ function viewRail(){
     h+='<div class="grp-itens'+(aberto?"":" fechado")+'">';
     g.itens.forEach(function(it){
       var n="";
-      if(it.c) n=items(it.c).length?String(items(it.c).length):"—";
+      if(it.c){ var ln=TAB[it.r]?listaTab(TAB[it.r]).length:items(it.c).length; n=ln?String(ln):"—"; }
       if(it.r==="obras") n=String(S.obras.length);
       if(it.r==="usuarios"){ if(!can("user.ler")) return; n=String(S.usuarios.length); }
       if(it.r==="registro"&&!can("log.ler")) return;
@@ -1050,7 +1419,7 @@ function sincronizarDerivados(o){
   var me=municipioInfo(o.munEmp);       if(me) o.ufEmp=me.uf;
   return o;
 }
-function emObra(){ return S.route==="folha"||S.route==="topologia"||S.route==="queda"; }
+function emObra(){ return S.route==="folha"||S.route==="topologia"||S.route==="queda"||S.route==="esforco"; }
 function marcarSujo(){
   var bar=document.querySelector(".salvabar");
   if(bar&&!bar.classList.contains("sujo")){
@@ -1204,7 +1573,7 @@ function campoHTML(c,o,errs){
 }
 
 /* Cabeçalho comum das telas de uma obra: título, abas e barra de gravação. */
-var ABAS_OBRA=[{r:"folha",l:"Folha de dados"},{r:"topologia",l:"Vãos entre pontos"},{r:"queda",l:"Queda de tensão"}];
+var ABAS_OBRA=[{r:"folha",l:"Folha de dados"},{r:"topologia",l:"Vãos entre pontos"},{r:"queda",l:"Queda de tensão"},{r:"esforco",l:"Esforço mecânico"}];
 function cabecalhoObra(o,desc){
   var h='<div class="phead"><div><h2>'+esc(o.empreendimento||"Nova obra")+"</h2>"+
     '<p class="desc">'+esc(desc)+"</p></div>"+
@@ -1314,26 +1683,36 @@ function proximoId(lista,prefixo){
   });
   return (prefixo||"")+(n+1);
 }
+/* Grade editável ligada a uma lista da obra.
+   Com rotulo nulo as linhas são fixas: sem botão de adicionar nem de excluir,
+   usado quando a grade só complementa linhas que nascem em outra aba.
+   c.pula(r) deixa a linha de fora sem mudar o índice das demais. */
 function grade(titulo,sub,chave,colunas,linhas,rotulo,acoes){
   var editavel=can("obra.edit");
+  var fixa=(rotulo===null);
   var h='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>'+esc(titulo)+"</h3>"+
     (sub?'<p class="sub">'+esc(sub)+"</p>":"")+"</div>"+
-    (editavel?'<div class="actions">'+(acoes||"")+'<button class="btn sm" data-add="'+chave+'">Adicionar '+esc(rotulo)+"</button></div>":"")+"</div>";
-  if(!linhas.length) return h+'<div class="empty" style="padding:28px"><p>Nenhum '+esc(rotulo)+" lançado.</p></div></div>";
+    (editavel&&!fixa?'<div class="actions">'+(acoes||"")+'<button class="btn sm" data-add="'+chave+'">Adicionar '+esc(rotulo)+"</button></div>":"")+"</div>";
+  var pula=colunas.pula||function(){ return false; };
+  var visiveis=linhas.filter(function(r){ return !pula(r); });
+  if(!visiveis.length) return h+'<div class="empty" style="padding:28px"><p>'+
+    (fixa?"Nada para mostrar ainda.":"Nenhum "+esc(rotulo)+" lançado.")+"</p></div></div>";
   h+='<div class="tbl-wrap"><table><thead><tr>'+
     colunas.map(function(c){ return "<th"+(c.num?' class="num"':"")+' style="min-width:'+(c.w||80)+'px">'+esc(c.l)+"</th>"; }).join("")+
-    (editavel?"<th></th>":"")+"</tr></thead><tbody>";
+    (editavel&&!fixa?"<th></th>":"")+"</tr></thead><tbody>";
   linhas.forEach(function(r,i){
+    if(pula(r)) return;
     h+="<tr>"+colunas.map(function(c){
       if(c.calc) return "<td"+(c.num?' class="num"':"")+">"+c.calc(r,i)+"</td>";
       var v=r[c.k]===undefined||r[c.k]===null?"":r[c.k];
       var attr=' data-g="'+chave+'" data-i="'+i+'" data-k="'+c.k+'"'+(editavel?"":" disabled");
-      if(c.ops) return '<td><select'+attr+'><option value="">—</option>'+
-        c.ops().map(function(p){ return '<option value="'+esc(p[0])+'"'+(String(v)===String(p[0])?" selected":"")+">"+esc(p[1])+"</option>"; }).join("")+"</select></td>";
+      if(c.ops) return '<td><select'+attr+'><option value="">'+esc(c.vazio||"—")+"</option>"+
+        c.ops(r).map(function(p){ return '<option value="'+esc(p[0])+'"'+(String(v)===String(p[0])?" selected":"")+">"+esc(p[1])+"</option>"; }).join("")+"</select></td>";
       return "<td"+(c.num?' class="num"':"")+'><input type="'+(c.tipo||"text")+'"'+attr+' value="'+esc(v)+'"'+
-        (c.step?' step="'+c.step+'"':"")+(c.min!==undefined?' min="'+c.min+'"':"")+"></td>";
+        (c.step?' step="'+c.step+'"':"")+(c.min!==undefined?' min="'+c.min+'"':"")+(c.max!==undefined?' max="'+c.max+'"':"")+
+        (c.ph?' placeholder="'+esc(typeof c.ph==="function"?c.ph(r):c.ph)+'"':"")+"></td>";
     }).join("")+
-    (editavel?'<td style="text-align:right"><button class="btn danger sm" data-del="'+chave+'" data-i="'+i+'">Excluir</button></td>':"")+"</tr>";
+    (editavel&&!fixa?'<td style="text-align:right"><button class="btn danger sm" data-del="'+chave+'" data-i="'+i+'">Excluir</button></td>':"")+"</tr>";
   });
   return h+"</tbody></table></div></div>";
 }
@@ -1554,6 +1933,147 @@ function viewQueda(){
 }
 
 /* ==========================================================================
+   ESFORÇO MECÂNICO — tela
+   ========================================================================== */
+function fmtAltura(a){ return a===null||a===undefined?"—":String(a).replace(".",","); }
+function fmtAng(a){ return a===null||a===undefined||a===""?"—":num(Number(a),0)+"°"; }
+
+/* Rótulo do vão como aparece no relatório: de onde para onde, com as letras. */
+function rotuloVao(obra,pontoId,v){
+  var pts={}; (obra.pontos||[]).forEach(function(p){ pts[String(p.id)]=p; });
+  var l=function(id){ var p=pts[id]; return p&&p.letra?String(p.letra).toUpperCase():id; };
+  return l(String(pontoId))+"–"+l(v.outro);
+}
+
+function viewEsforco(){
+  var o=S.rascunho;
+  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
+  o.trafos=o.trafos||[]; o.pontos=o.pontos||[]; o.trechos=o.trechos||[];
+  var h=cabecalhoObra(o,"Força dos cabos em cada poste, resultante e poste escolhido, pela GED 3648.");
+  var calc=calcularEsforcos(o), ctx=calc.ctx;
+  var ed=can("obra.edit");
+
+  /* O que a conta precisa e onde corrigir. */
+  var faltam=[];
+  if(!ctx.uf||!ctx.kv) faltam.push("o município da obra, que define a UF e a classe de tensão");
+  if(!ctx.vao) faltam.push("o vão básico entre postes");
+  if(faltam.length)
+    h+='<div class="consist bad"><div><strong>Faltam dados na folha</strong><div class="note">Preencha '+
+       faltam.join(" e ")+" para o cálculo rodar.</div></div></div>";
+
+  /* Parâmetros da obra para o esforço. */
+  var cabos=(ctx.uf&&ctx.kv&&ctx.vao)?cabosPrimariosGed(ctx.uf,ctx.kv,ctx.vao):[];
+  var daFolha=tagPrimarioDaFolha(o.caboPrimario);
+  var opPrim='<option value="">'+(daFolha?"Da folha de dados ("+esc(daFolha)+")":"—")+"</option>"+
+    cabos.map(function(x){ return '<option value="'+esc(x.tag)+'"'+(String(o.caboPrimarioMec||"")===String(x.tag)?" selected":"")+">"+
+      esc(x.tag+" · "+x.bitola.trim()+" · "+x.tipo.replace(/^\d-/,"").toLowerCase()+" · "+x.tracao+" kgf")+"</option>"; }).join("");
+  var opAlt=function(k,lista,padrao){
+    return '<select data-mec="'+k+'"'+(ed?"":" disabled")+'><option value="">Padrão ('+fmtAltura(padrao)+" m)</option>"+
+      lista.map(function(a){ return '<option value="'+a+'"'+(String(o[k]||"")===String(a)?" selected":"")+">"+fmtAltura(a)+" m</option>"; }).join("")+"</select>";
+  };
+  var par=(S.cat.postes&&S.cat.postes.parametros)||{};
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Parâmetros do esforço</h3>'+
+    '<p class="sub">UF, classe de tensão e vão básico vêm da folha de dados e escolhem a linha da tabela de tração.</p></div></div>'+
+    '<div class="panel-b"><div class="fgrid">'+
+    '<div class="fld c1"><label>UF</label><input value="'+esc(ctx.uf||"—")+'" disabled></div>'+
+    '<div class="fld c1"><label>Classe de tensão</label><input value="'+esc(ctx.kv?ctx.kv+" kV":"—")+'" disabled></div>'+
+    '<div class="fld c1"><label>Vão básico</label><input value="'+esc(ctx.vao?ctx.vao+" m":"—")+'" disabled></div>'+
+    '<div class="fld c3"><label>Cabo primário na GED 3648</label><select data-mec="caboPrimarioMec"'+(ed?"":" disabled")+">"+opPrim+"</select>"+
+      '<div class="drv">'+(daFolha?"A folha indica "+esc(o.caboPrimario)+", que existe na tabela.":
+        (o.caboPrimario?"A folha indica "+esc(o.caboPrimario)+", que não é uma tag da GED 3648: escolha aqui.":"Escolha o cabo dos vãos primários."))+"</div></div>"+
+    '<div class="fld c2"><label>Altura do poste com primário</label>'+opAlt("alturaPostePrim",[11,12],par.alturaPrimario||11)+"</div>"+
+    '<div class="fld c2"><label>Altura do poste só com secundário</label>'+opAlt("alturaPosteSec",[9,10.5,11,12],par.alturaSecundario||9)+"</div>"+
+    "</div></div></div>";
+
+  if(!o.trechos.length){
+    return h+'<div class="panel"><div class="empty"><h4>Nenhum vão lançado</h4>'+
+      "<p>O esforço é calculado a partir dos trechos da aba de vãos entre pontos.</p></div></div>";
+  }
+
+  /* Grade de postes: o que só o projetista sabe — ângulos, altura, estai. */
+  var porId={}; calc.postes.forEach(function(r){ porId[r.id]=r; });
+  var opsAlt=function(){ return [9,10.5,11,12].map(function(a){ return [a,fmtAltura(a)+" m"]; }); };
+  var cols=[
+    {l:"Poste",w:60,calc:function(r){ return '<strong class="mono">'+esc(r.id)+"</strong>"+(r.letra?' <span class="pill">'+esc(String(r.letra).toUpperCase())+"</span>":""); }},
+    {l:"Vãos, na ordem da conta",w:230,calc:function(r){
+      var c=porId[String(r.id)]; if(!c) return "—";
+      return c.vaos.map(function(v,i){
+        return '<div style="white-space:nowrap"><span class="mono" style="color:var(--muted)">'+(i+1)+"</span> "+
+          esc(rotuloVao(o,r.id,v))+' <span style="color:var(--muted);font-size:11.5px">'+
+          esc([v.prim?v.prim:null,v.sec?"sec "+v.bitola:null].filter(Boolean).join(" + ")||"sem cabo")+"</span></div>"; }).join(""); }},
+    {k:"ang12",l:"Âng. vão 1–2 (°)",tipo:"number",min:0,max:360,num:1,w:110,ph:function(r){ var c=porId[String(r.id)]; return c&&c.vaos.length===2?"180":""; }},
+    {k:"ang23",l:"Âng. vão 2–3 (°)",tipo:"number",min:0,max:360,num:1,w:110},
+    {k:"ang34",l:"Âng. vão 3–4 (°)",tipo:"number",min:0,max:360,num:1,w:110},
+    {k:"alturaPoste",l:"Altura",w:110,ops:opsAlt,vazio:"Automática"},
+    {k:"estai",l:"Estai",w:120,ops:function(){ return [["ECP","Cruzeta a poste"],["EPP","Poste a poste"]]; },vazio:"Sem estai"},
+    {k:"caboEstai",l:"Cabo do estai",w:130,vazio:"Primário da obra",ops:function(){ return cabos.map(function(x){ return [x.tag,x.tag]; }); }},
+    {k:"calcEspecifico",l:"Vão real",w:100,ops:function(){ return [["Sim","Sim"]]; },vazio:"Não"}
+  ];
+  cols.pula=function(r){ return !porId[String(r.id)]; };
+  h+=grade("Postes","Ângulo entre vãos como na planilha: 180° é linha reta. Com dois vãos e nada digitado vale 180°. "+
+    "Vão real usa o comprimento do trecho no lugar do vão básico.","pontos",cols,o.pontos,null);
+
+  /* Relatório por poste, no formato da impressão da planilha. */
+  var resumo={}, comAlerta=0;
+  calc.postes.forEach(function(r){ if(r.nome) resumo[r.nome]=(resumo[r.nome]||0)+1; if(r.alertas.length) comAlerta++; });
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Esforço por poste</h3>'+
+    '<p class="sub">'+calc.postes.length+" poste"+(calc.postes.length===1?"":"s")+" com vãos"+
+    (Object.keys(resumo).length?" · "+Object.keys(resumo).sort().map(function(k){ return resumo[k]+"× "+k; }).join(" · "):"")+"</p></div>"+
+    "<div>"+(comAlerta?'<span class="chip warn">'+comAlerta+" poste"+(comAlerta>1?"s":"")+" com aviso</span>":
+      (calc.postes.length?'<span class="chip ok">sem avisos</span>':""))+"</div></div>";
+  var celVao=function(r,i){
+    var v=r.vaos[i]; if(!v) return '<td></td><td></td>';
+    return '<td class="mono">'+(v.prim?esc(v.prim):"")+'</td><td class="mono">'+(v.sec?esc(v.sec):"")+"</td>";
+  };
+  h+='<div class="tbl-wrap"><table><thead>'+
+    '<tr><th rowspan="2">Poste</th><th colspan="2">Vão 01</th><th colspan="2">Vão 02</th><th colspan="2">Vão 03</th><th colspan="2">Vão 04</th>'+
+    '<th colspan="3" class="num">Ângulo entre vãos</th><th rowspan="2" class="num">Força resultante (kgf)</th>'+
+    '<th rowspan="2">Tipo de poste</th><th rowspan="2">Estrutura primária</th><th rowspan="2">Estrutura secundária</th></tr>'+
+    "<tr><th>Prim.</th><th>Sec.</th><th>Prim.</th><th>Sec.</th><th>Prim.</th><th>Sec.</th><th>Prim.</th><th>Sec.</th>"+
+    '<th class="num">1–2</th><th class="num">2–3</th><th class="num">3–4</th></tr></thead><tbody>'+
+    calc.postes.map(function(r){
+      return "<tr"+(r.alertas.length?' class="fora"':"")+'><td class="mono"><strong>'+esc(r.id)+"</strong>"+
+        (r.ponto.letra?' <span class="pill">'+esc(String(r.ponto.letra).toUpperCase())+"</span>":"")+"</td>"+
+        celVao(r,0)+celVao(r,1)+celVao(r,2)+celVao(r,3)+
+        '<td class="num">'+(r.vaos.length===1?"FL":fmtAng(r.angulos[0]))+'</td><td class="num">'+fmtAng(r.angulos[1])+
+        '</td><td class="num">'+fmtAng(r.angulos[2])+'</td><td class="num"><strong>'+(r.R===null?"—":num(r.R,1))+"</strong></td>"+
+        "<td>"+(r.nome?'<strong class="mono">'+esc(r.nome)+'</strong> <span style="color:var(--muted);font-size:11.5px">'+r.poste+" daN</span>":"—")+"</td>"+
+        '<td class="mono">'+esc(r.estruturaPrim||"—")+'</td><td class="mono">'+esc(r.estruturaSec||"—")+"</td></tr>"+
+        (r.alertas.length?'<tr class="fora"><td></td><td colspan="15" style="font-size:12px;color:var(--bad)">'+
+          r.alertas.map(esc).join("<br>")+"</td></tr>":"");
+    }).join("")+"</tbody></table></div></div>";
+
+  /* Conta aberta: cada força e cada resultante, para conferir contra a planilha. */
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Conta aberta</h3>'+
+    '<p class="sub">F = tração × altura do cabo ÷ altura livre, em kgf. As colunas são as CU a DJ da planilha.</p></div></div>'+
+    '<div class="tbl-wrap"><table><thead><tr><th>Poste</th><th class="num">Altura</th><th class="num">Alt. livre</th>'+
+    '<th class="num">Alt. prim.</th><th class="num">Alt. sec.</th>'+
+    '<th class="num">F1</th><th class="num">F2</th><th class="num">F3</th><th class="num">F4</th>'+
+    '<th class="num">R1</th><th class="num">β</th><th class="num">R2</th><th class="num">γ</th><th class="num">R3</th>'+
+    "<th>Regra do poste</th></tr></thead><tbody>"+
+    calc.postes.map(function(r){
+      var g=r.geo||{};
+      var hs=g.secundario!==undefined?(g.secundario-((Number(r.altura)===9&&r.estai)?0.2:0)):null;
+      var f=function(x){ return x?num(x,2):"—"; };
+      return '<tr><td class="mono"><strong>'+esc(r.id)+'</strong></td><td class="num">'+fmtAltura(r.altura)+
+        (r.ponto.alturaPoste?"":' <span style="color:var(--muted);font-size:11px">auto</span>')+
+        '</td><td class="num">'+(g.livre!==undefined?num(g.livre,2):"—")+'</td><td class="num">'+(g.primario?num(g.primario,2):"—")+
+        '</td><td class="num">'+(hs!==null?num(hs,2):"—")+"</td>"+
+        r.F.map(function(x){ return '<td class="num">'+f(x)+"</td>"; }).join("")+
+        '<td class="num">'+f(r.res.R1)+'</td><td class="num">'+(r.res.beta?num(r.res.beta,1)+"°":"—")+
+        '</td><td class="num">'+f(r.res.R2)+'</td><td class="num">'+(r.res.gama?num(r.res.gama,1)+"°":"—")+
+        '</td><td class="num">'+f(r.res.R3)+'</td><td style="font-size:12px">'+esc(r.regra||"—")+
+        (r.especifico?' <span class="pill">vão real</span>':"")+(r.estai?' <span class="pill">estai '+esc(r.estai)+"</span>":"")+"</td></tr>";
+    }).join("")+"</tbody></table></div></div>";
+
+  h+='<p class="note">O poste é o de menor capacidade nominal cuja capacidade útil comporta a resultante: '+
+    capacidadesPoste().map(function(c){ return c.nominal+" daN até "+num(c.util,0)+" kgf"; }).join(", ")+
+    ". Valem os mínimos da planilha: 9 m em ângulo acima de "+ctx.angMax9+"° é 9/4, 12 m é no mínimo 400, "+
+    "secundário de 120 mm² é no mínimo 400 e a estrutura da rede compacta impõe a capacidade mínima dela.</p>";
+  return h;
+}
+
+/* ==========================================================================
    CADASTROS E TABELAS
    ========================================================================== */
 var TAB={
@@ -1639,7 +2159,101 @@ var TAB={
    novo:{bitola:"",altura:9,carga:"",diamTopo:null,diamBase:null,distancias:[10,null,null,null,null,null,null,null,null,null]},
    form:[["bitola","Bitola (ex.: 9/300)"],["altura","Altura (m)","number"],["carga","Carga nominal (daN)"],
          ["diamTopo","Diâmetro do topo (mm)","number"],["diamBase","Diâmetro da base (mm)","number"]],
-   formExtra:formPontos, lerExtra:lerPontos}
+   formExtra:formPontos, lerExtra:lerPontos},
+
+ /* ---------- usados no cálculo elétrico (entrega 2.1) ---------- */
+ cabos_qt:{cat:"cabos_qt",t:"Cabos — queda de tensão",
+   d:"Coeficiente de queda de tensão por bitola, da GED 3667 Tab. 4.1, e amperagem máxima. O cálculo escolhe a coluna pela tensão da rede e pelo fator de potência.",
+   cols:[["bitola","Bitola",function(v,r){ return '<span class="mono">'+esc(v)+"</span> "+esc(r.unidade||""); }],
+         ["amperagem","Amperagem (A)",function(v){ return v===null||v===undefined?"—":num(v,0); },1],
+         ["coef","220 V · fp 1",function(v){ return v&&v["220_1"]!==null&&v["220_1"]!==undefined?num(v["220_1"],4):"—"; },1],
+         ["coef","220 V · fp 0,92",function(v){ return v&&v["220_092"]!==null&&v["220_092"]!==undefined?num(v["220_092"],4):"—"; },1],
+         ["coef","380 V · fp 1",function(v){ return v&&v["380_1"]!==null&&v["380_1"]!==undefined?num(v["380_1"],4):"—"; },1],
+         ["coef","380 V · fp 0,92",function(v){ return v&&v["380_092"]!==null&&v["380_092"]!==undefined?num(v["380_092"],4):"—"; },1]],
+   busca:["bitola","unidade"],perm:"norm",
+   novo:{bitola:"",unidade:"mm²",amperagem:null,coef:{"220_1":null,"220_092":null,"380_1":null,"380_092":null}},
+   form:[["bitola","Bitola"],["unidade","Unidade"],["amperagem","Amperagem máxima (A)","number"]],
+   formExtra:function(b){ var c=b.coef||{};
+     return '<div class="fgrid" style="margin-top:10px">'+[["220_1","220 V · fp 1"],["220_092","220 V · fp 0,92"],["380_1","380 V · fp 1"],["380_092","380 V · fp 0,92"]]
+       .map(function(x){ var v=c[x[0]]; return '<div class="fld c3"><label>Coeficiente '+x[1]+'</label><input type="number" step="any" data-coef="'+x[0]+
+         '" value="'+(v===null||v===undefined?"":v)+'"></div>'; }).join("")+"</div>"; },
+   lerExtra:function(bg,rec){ var c=Object.assign({},rec.coef||{});
+     bg.querySelectorAll("[data-coef]").forEach(function(i){ c[i.getAttribute("data-coef")]=i.value===""?null:Number(i.value); }); rec.coef=c; }},
+ trafos:{cat:"trafos",t:"Transformadores",
+   d:"Potências nominais e carregamento máximo por tipo de empreendimento. O fator de carregamento também pode ser definido por obra, nos parâmetros da folha de dados.",
+   cols:[["nominal","Potência nominal (kVA)",function(v){ return num(v,1); },1],
+         ["maxNucleo","Máximo núcleo habitacional (kVA)",function(v){ return v===null||v===undefined?"—":num(v,3); },1],
+         ["maxLoteamento","Máximo loteamento (kVA)",function(v){ return v===null||v===undefined?"—":num(v,3); },1]],
+   busca:["nominal"],perm:"norm",novo:{nominal:null,maxNucleo:null,maxLoteamento:null},
+   form:[["nominal","Potência nominal (kVA)","number"],["maxNucleo","Máximo núcleo habitacional (kVA)","number"],["maxLoteamento","Máximo loteamento (kVA)","number"]]},
+ luminarias:{cat:"luminarias",t:"Luminárias",d:"Modelos de luminária e consumo em kVA, usados na carga de iluminação pública.",
+   cols:[["modelo","Modelo",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }],["consumo","Consumo (kVA)",function(v){ return num(v,3); },1],
+         ["tipo","Tipo"],["braco","Braço"]],
+   busca:["modelo","tipo"],perm:"norm",novo:{modelo:"",consumo:null,tipo:"",braco:""},
+   form:[["modelo","Modelo"],["consumo","Consumo (kVA)","number"],["tipo","Tipo"],["braco","Braço"]]},
+ empreendimentos:{cat:"empreendimentos",t:"Tipos de empreendimento",d:"Fator de potência e fator de carregamento do transformador por tipo de empreendimento.",
+   cols:[["tipo","Tipo"],["fatorPotencia","Fator de potência",function(v){ return num(v,2); },1],
+         ["kvatAdmissivel","Carregamento (× KVAN)",function(v){ return v===null||v===undefined?"—":num(v,3); },1]],
+   busca:["tipo"],perm:"norm",novo:{tipo:"",fatorPotencia:1,kvatAdmissivel:null},
+   form:[["tipo","Tipo de empreendimento"],["fatorPotencia","Fator de potência","number"],["kvatAdmissivel","Fator de carregamento (KVAT ÷ KVAN)","number"]]},
+ est_sec:{cat:"estruturas",campo:"secundarias",t:"Estruturas secundárias por ângulo",
+   d:"Estrutura da rede secundária pelo ângulo entre os vãos no poste. A faixa marcada como inferida não consta na planilha de origem.",
+   cols:[["de","De (°)",null,1],["ate","Até (°)",null,1],["estrutura","Estrutura",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }],
+         ["inferida","Origem",function(v){ return v?'<span class="chip warn">inferida, a confirmar</span>':"planilha"; }]],
+   busca:["estrutura"],perm:"norm",novo:{de:null,ate:null,estrutura:"",inferida:false},
+   form:[["estrutura","Estrutura"],["de","Ângulo inicial (°)","number"],["ate","Ângulo final (°)","number"]]},
+ est_prim:{cat:"estruturas",campo:"primarias",t:"Estruturas primárias por ângulo",
+   d:"Estrutura primária pelo ângulo entre os vãos, na forma simplificada. No esforço mecânico vale a tabela da rede compacta, que considera também o número de vãos primários.",
+   cols:[["de","De (°)",null,1],["ate","Até (°)",null,1],["estrutura","Estrutura",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }]],
+   busca:["estrutura"],perm:"norm",novo:{de:null,ate:null,estrutura:""},
+   form:[["estrutura","Estrutura"],["de","Ângulo inicial (°)","number"],["ate","Ângulo final (°)","number"]]},
+
+ /* ---------- usados no esforço mecânico (entrega 2.2) ---------- */
+ tracao:{cat:"tracao",t:"Tração de cabos — GED 3648",
+   d:"Tração de projeto em kgf por cabo, UF, classe de tensão primária e vão básico. É a força que cada cabo aplica ao poste.",
+   cols:[["tag","Tag",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }],["bitola","Bitola"],
+         ["tipo","Tipo",function(v){ return esc(String(v||"").replace(/^\d-/,"")); }],["uf","UF"],
+         ["kv","Classe (kV)",null,1],["vao","Vão básico (m)",null,1],["tracao","Tração (kgf)",function(v){ return num(v,0); },1]],
+   busca:["tag","bitola","tipo","uf"],perm:"norm",novo:{tag:"",bitola:"",tipo:"",uf:"SP",kv:15,vao:35,tracao:null},
+   form:[["tag","Tag do cabo"],["bitola","Bitola"],["tipo","Tipo"],["uf","UF"],["kv","Classe de tensão (kV)","number"],
+         ["vao","Vão básico (m)","number"],["tracao","Tração de projeto (kgf)","number"]]},
+ postes_cap:{cat:"postes",campo:"capacidades",t:"Postes — capacidade útil",
+   d:"O poste escolhido é o de menor capacidade nominal cuja capacidade útil (nominal × tolerância) comporta a resultante. A planilha tem uma segunda tabela com 0,85 para 600 daN; o cálculo dela usa esta, com 0,91.",
+   cols:[["nominal","Capacidade nominal (daN)",null,1],["tolerancia","Tolerância",function(v){ return num(v,2); },1],
+         ["util","Capacidade útil (kgf)",function(v,r){ return '<span class="derivado">'+num(Number(r.nominal)*Number(r.tolerancia),0)+"</span>"; },1]],
+   busca:["nominal"],perm:"norm",novo:{nominal:null,tolerancia:1},
+   form:[["nominal","Capacidade nominal (daN)","number"],["tolerancia","Tolerância (0 a 1)","number"]]},
+ postes_geo:{cat:"postes",campo:"geometria",t:"Postes — geometria",
+   d:"Engastamento, altura livre e altura dos cabos por altura de poste. A força de cada cabo é reduzida ao topo pela razão entre a altura dele e a altura livre.",
+   cols:[["altura","Altura (m)",function(v){ return fmtAltura(v); },1],["engastamento","Engastamento (m)",function(v){ return num(v,2); },1],
+         ["livre","Altura livre (m)",function(v){ return num(v,2); },1],["primario","Primário (m)",function(v){ return v?num(v,2):"—"; },1],
+         ["secundario","Secundário (m)",function(v){ return num(v,2); },1],["estai","Estai (m)",function(v){ return num(v,2); },1]],
+   busca:["altura"],perm:"norm",novo:{altura:null,engastamento:null,livre:null,primario:null,secundario:null,estai:null},
+   form:[["altura","Altura do poste (m)","number"],["engastamento","Engastamento (m)","number"],["livre","Altura livre (m)","number"],
+         ["primario","Altura do primário (m)","number"],["secundario","Altura do secundário (m)","number"],["estai","Altura do estai (m)","number"]]},
+ postes_disp:{cat:"postes",campo:"disponiveis",t:"Postes — alturas disponíveis",
+   d:"Capacidades nominais que existem em cada altura. O sistema avisa quando a conta pede um poste que não está nesta lista.",
+   cols:[["altura","Altura (m)",function(v){ return fmtAltura(v); },1],
+         ["nominais","Capacidades (daN)",function(v){ return (v||[]).map(function(n){ return '<span class="pill" style="margin-right:3px">'+n+"</span>"; }).join(""); }]],
+   busca:["altura"],perm:"norm",novo:{altura:null,nominais:[]},
+   form:[["altura","Altura do poste (m)","number"]],
+   formExtra:function(b){ return '<div class="fgrid" style="margin-top:10px"><div class="fld c6"><label>Capacidades nominais (daN), separadas por vírgula</label>'+
+     '<input type="text" data-nominais value="'+esc((b.nominais||[]).join(", "))+'"></div></div>'; },
+   lerExtra:function(bg,rec){ var i=bg.querySelector("[data-nominais]");
+     rec.nominais=String(i.value||"").split(/[,;\s]+/).filter(Boolean).map(Number).filter(function(n){ return !isNaN(n); }); }},
+ estruturas_rc:{cat:"estruturas_rc",t:"Estruturas da rede compacta",
+   d:"Estrutura primária pelo número de vãos primários no poste e pela deflexão (|ângulo − 180|). Ela impõe altura e capacidade mínima ao poste.",
+   cols:[["equipamento","Poste",function(v){ return v==="X"?"Sem equipamento":"Transformador "+esc(v)+" kVA"; }],
+         ["primarios","Vãos prim.",null,1],["faixa","Deflexão",function(v){ return v==="FL"?"fim de linha":"até "+esc(v)+"°"; }],
+         ["estrutura","Estrutura CPFL",function(v){ return '<span class="mono">'+esc(v&&v.CPFL||"—")+"</span>"; }],
+         ["descricao","Descrição"],["altura","Altura (m)",null,1],["capacidadeMin","Mínimo (daN)",null,1]],
+   busca:["equipamento","descricao","faixa"],perm:"norm",
+   novo:{equipamento:"X",variante:"X",posicoes:"",primarios:2,faixa:"0",igual:false,estrutura:{CPFL:""},descricao:"",altura:11,capacidadeMin:200},
+   form:[["descricao","Descrição"],["equipamento","Equipamento (X ou potência do trafo)"],["primarios","Vãos primários","number"],
+         ["faixa","Deflexão (0, 6, 30, 60, 135 ou FL)"],["altura","Altura do poste (m)","number"],["capacidadeMin","Capacidade mínima (daN)","number"]],
+   formExtra:function(b){ return '<div class="fgrid" style="margin-top:10px"><div class="fld c3"><label>Estrutura CPFL</label>'+
+     '<input type="text" data-estcpfl value="'+esc((b.estrutura&&b.estrutura.CPFL)||"")+'"></div></div>'; },
+   lerExtra:function(bg,rec){ rec.estrutura=Object.assign({},rec.estrutura||{},{CPFL:bg.querySelector("[data-estcpfl]").value}); }}
 };
 
 function barraRevisao(chave){
@@ -1672,7 +2286,7 @@ function editarRevisao(chave){
     });
 }
 function viewTabela(rota){
-  var cfg=TAB[rota], lista=items(cfg.cat), c=S.cat[cfg.cat];
+  var cfg=TAB[rota], lista=listaTab(cfg), c=S.cat[cfg.cat];
   var q=S.q.trim().toLowerCase();
   var fil=!q?lista:lista.filter(function(r){ return cfg.busca.some(function(k){ return String(r[k]||"").toLowerCase().indexOf(q)>=0; }); });
   var editavel=can(cfg.perm+".edit");
@@ -1862,7 +2476,7 @@ function lerForm(bg){ var o={};
   return o; }
 
 function editarRegistro(rota,idx){
-  var cfg=TAB[rota], lista=items(cfg.cat);
+  var cfg=TAB[rota], lista=listaTab(cfg);
   var novo=idx<0, base=novo?Object.assign({},cfg.novo):Object.assign({},lista[idx]);
   modal((novo?"Adicionar em ":"Editar registro de ")+cfg.t.toLowerCase(),
     formCampos(cfg.form,base)+(cfg.formExtra?cfg.formExtra(base):""),async function(bg){
@@ -1884,17 +2498,17 @@ function editarRegistro(rota,idx){
       cfg.derivar(rec);
     }
     if(novo) lista.push(rec); else lista[idx]=rec;
-    S.cat[cfg.cat].items=lista;
+    gravarListaTab(cfg,lista);
     try{ await Store.salvarCatalogo(cfg.cat); }catch(e){ toast(e.message); return false; }
     await Store.registrar(novo?"Incluiu registro":"Alterou registro",cfg.cat,cfg.t+" · "+String(rec[cfg.form[0][0]]));
     toast(novo?"Registro incluído":"Registro alterado"); render();
   });
 }
 function excluirRegistro(rota,idx){
-  var cfg=TAB[rota], lista=items(cfg.cat), r=lista[idx];
+  var cfg=TAB[rota], lista=listaTab(cfg), r=lista[idx];
   modal("Excluir registro","<p>Excluir <strong>"+esc(String(r[cfg.form[0][0]]))+"</strong> de "+esc(cfg.t.toLowerCase())+
     '?</p><p class="note">A operação fica registrada no log com o seu usuário.</p>',async function(){
-    lista.splice(idx,1); S.cat[cfg.cat].items=lista;
+    lista.splice(idx,1); gravarListaTab(cfg,lista);
     try{ await Store.salvarCatalogo(cfg.cat); }catch(e){ toast(e.message); return false; }
     await Store.registrar("Excluiu registro",cfg.cat,cfg.t+" · "+String(r[cfg.form[0][0]]));
     toast("Registro excluído"); render();
@@ -1973,6 +2587,7 @@ function desenhar(){
     case "folha": corpo=viewFolha(); break;
     case "topologia": corpo=viewTopologia(); break;
     case "queda": corpo=viewQueda(); break;
+    case "esforco": corpo=viewEsforco(); break;
     case "usuarios": corpo=can("user.ler")?viewUsuarios():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "registro": corpo=can("log.ler")?viewRegistro():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "cabos": corpo=viewCabos(); break;
@@ -1993,6 +2608,12 @@ async function irPara(destino){
 }
 /* Põe o foco no campo que o Enter escolheu, depois que a tela foi redesenhada. */
 function focarGuardado(){
+  var fg=S.focoGrade;
+  if(fg){
+    S.focoGrade=null;
+    var cel=document.querySelector('[data-g="'+fg.g+'"][data-i="'+fg.i+'"][data-k="'+fg.k+'"]');
+    if(cel&&!cel.disabled){ cel.focus(); if(cel.select) try{ cel.select(); }catch(e){} }
+  }
   var k=S.focoCampo;
   if(!k) return;
   S.focoCampo=null;
@@ -2114,7 +2735,26 @@ function ligarEventos(){
       if(ev==="change") render();
       else marcarSujo();
     });
-    inp.addEventListener("blur",function(){ if(inp.tagName!=="SELECT") render(); });
+    /* Sair da célula redesenha a grade; a célula para onde o foco ia é
+       devolvida depois, senão o que se digita a seguir cai no vazio. */
+    inp.addEventListener("blur",function(e){
+      if(inp.tagName==="SELECT") return;
+      var indo=e&&e.relatedTarget;
+      if(indo&&indo.getAttribute&&indo.getAttribute("data-g"))
+        S.focoGrade={g:indo.getAttribute("data-g"),i:indo.getAttribute("data-i"),k:indo.getAttribute("data-k")};
+      render();
+    });
+  });
+
+  /* Parâmetros do esforço mecânico, gravados na própria obra. */
+  document.querySelectorAll("[data-mec]").forEach(function(sel){
+    sel.addEventListener("change",function(){
+      var o=S.rascunho; if(!o) return;
+      var k=sel.getAttribute("data-mec"), v=sel.value;
+      if(k==="alturaPostePrim"||k==="alturaPosteSec") v=v===""?"":Number(v);
+      o[k]=v;
+      render();
+    });
   });
 
   var bs=document.getElementById("btnSalvar");
