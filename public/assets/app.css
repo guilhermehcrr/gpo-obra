@@ -224,3 +224,56 @@ tbody tr.fora:hover{background:var(--alert-soft);filter:brightness(.97)}
   .rail .grp{grid-column:1/-1}
   .content{padding:18px}
 }
+
+/* ---------- AUDITORIA DE CÁLCULO ---------- */
+.modal.aud{max-width:1060px;max-height:92vh}
+.modal.aud .modal-h{align-items:flex-start;gap:16px}
+.modal.aud .modal-f{justify-content:flex-start}
+.aud-sub{margin:3px 0 0;font-size:12px;color:var(--muted)}
+.aud-acoes{display:flex;gap:7px;flex:none}
+.aud-sel{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;padding:11px 18px;border-bottom:1px solid var(--line-2);background:var(--surface-2)}
+.aud-sel .fld{min-width:220px;flex:0 1 320px}
+.aud-intro{margin:0 0 4px}
+.aud-sec{margin:22px 0 0;padding-bottom:7px;border-bottom:1px solid var(--line)}
+.aud-sec h4{margin:0;font-size:13.5px;font-weight:600}
+.aud-sec p{margin:2px 0 0;font-size:12px;color:var(--muted)}
+.aud-passo{display:grid;grid-template-columns:30px minmax(0,1fr);gap:0 10px;padding:13px 0;border-bottom:1px solid var(--line-2)}
+.aud-passo:last-child{border-bottom:none}
+.aud-passo.dif .aud-n{color:var(--alert);font-weight:600}
+.aud-n{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);padding-top:2px}
+.aud-t{font-weight:600;font-size:13px}
+.aud-txt{margin:4px 0 0;font-size:12.5px;color:var(--text-2);line-height:1.55}
+.aud-regra,.aud-conta{margin-top:7px;padding:7px 10px;border-radius:var(--r);font-family:"IBM Plex Mono",monospace;font-size:12.5px;
+  white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
+.aud-regra{background:var(--surface-2);border:1px solid var(--line-2);color:var(--text-2)}
+.aud-conta{background:var(--accent-soft);border:1px solid transparent;color:var(--text)}
+.aud-regra span,.aud-conta span{display:block;font-family:"IBM Plex Sans",sans-serif;font-size:10.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+.aud-r{margin-top:7px;font-size:12.5px;color:var(--text-2)}
+.aud-r b{font-family:"IBM Plex Mono",monospace;font-size:14px;color:var(--text);margin-left:8px}
+.aud-fonte{margin-top:5px;font-size:11.5px;color:var(--muted)}
+.aud-alerta{margin-top:7px;padding:6px 10px;border-left:3px solid var(--alert);background:var(--alert-soft);color:var(--alert);
+  font-size:12px;border-radius:var(--r)}
+.aud-tab{margin-top:8px;border:1px solid var(--line-2);border-radius:var(--r);overflow:auto;max-height:340px}
+.aud-tab table{font-size:12.5px}
+.aud-tab th,.aud-tab td{padding:5px 10px}
+.aud-tab td{white-space:normal}
+.aud-tab tr.aud-marca td{background:var(--accent-soft);font-weight:500}
+.aud-conf{font-size:12.5px}
+.aud-conf.ok{color:var(--accent-2)}
+.aud-conf.bad{color:var(--alert);font-weight:500}
+@media(max-width:680px){
+  .modal.aud .modal-h{flex-direction:column}
+  .aud-sel .fld{min-width:0;flex:1 1 100%}
+  .aud-passo{grid-template-columns:24px minmax(0,1fr)}
+}
+@media print{
+  body.com-aud{background:#fff}
+  body.com-aud #app,body.com-aud .toast{display:none!important}
+  body.com-aud .aud-bg{position:static;inset:auto;background:none;padding:0;display:block}
+  body.com-aud .modal.aud{box-shadow:none;max-width:none;max-height:none}
+  body.com-aud .modal.aud .modal-b{overflow:visible}
+  body.com-aud .aud-acoes{display:none}
+  body.com-aud .aud-tab{max-height:none;overflow:visible}
+  body.com-aud .aud-passo{break-inside:avoid}
+}

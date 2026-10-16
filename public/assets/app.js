@@ -45,7 +45,7 @@ function gravarListaTab(cfg,lista){ S.cat[cfg.cat]=S.cat[cfg.cat]||{}; S.cat[cfg
 function revisaoDe(k){ var c=S.cat[k]; return (c&&c.revisao)||null; }
 function rotuloRevisao(k){ var r=revisaoDe(k); return r&&r.versao?r.versao:"não informada"; }
 // Tabelas cuja revisão é carimbada na obra, porque entram no cálculo ou no memorial.
-var TABELAS_NORMATIVAS=["anexo1","cabos_qt","trafos","luminarias","empreendimentos","estruturas","tracao","postes","estruturas_rc","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
+var TABELAS_NORMATIVAS=["anexo1","cabos_qt","trafos","luminarias","empreendimentos","estruturas","tracao","postes","estruturas_rc","cintas_estruturas","estruturas_sec","ged","ged3738","normas","padroes","especificacoes","fornecedores_aprovados","cintas","cabos"];
 function revisoesAtuais(){
   var o={};
   TABELAS_NORMATIVAS.forEach(function(k){ var r=revisaoDe(k); if(r&&r.versao) o[k]=r.versao; });
@@ -62,7 +62,7 @@ function revisoesDefasadas(obra){
 }
 var NOME_TABELA={anexo1:"Anexo 1 — previsão de consumo",
   cabos_qt:"Cabos — queda de tensão",trafos:"Transformadores",luminarias:"Luminárias",
-  empreendimentos:"Tipos de empreendimento",estruturas:"Estruturas por ângulo",tracao:"Tração de cabos — GED 3648",postes:"Postes — capacidade e geometria",estruturas_rc:"Estruturas da rede compacta",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
+  empreendimentos:"Tipos de empreendimento",estruturas:"Estruturas por ângulo",tracao:"Tração de cabos — GED 3648",postes:"Postes — capacidade e geometria",estruturas_rc:"Estruturas da rede compacta",cintas_estruturas:"Cintas por estrutura",estruturas_sec:"Estrutura secundária",ged:"GED aplicável",ged3738:"GED 3738 — consumo",normas:"Normas técnicas",
   padroes:"Padrões de instalação",especificacoes:"Especificações técnicas",
   fornecedores_aprovados:"Fornecedores aprovados",cintas:"Diâmetro de poste e cintas",cabos:"Dados técnicos de cabos"};
 function initials(n){ return (n||"?").split(/\s+/).slice(0,2).map(function(w){return w[0];}).join("").toUpperCase(); }
@@ -112,7 +112,8 @@ function storePrevia(DB){
     anexo1:"normativas/anexo1", ged:"normativas/ged", ged3738:"normativas/ged3738", cintas:"normativas/cintas", cabos:"normativas/cabos",
     cabos_qt:"normativas/cabos_qt", trafos:"normativas/trafos", luminarias:"normativas/luminarias",
     empreendimentos:"normativas/empreendimentos", estruturas:"normativas/estruturas",
-    tracao:"normativas/tracao", postes:"normativas/postes", estruturas_rc:"normativas/estruturas_rc" };
+    tracao:"normativas/tracao", postes:"normativas/postes", estruturas_rc:"normativas/estruturas_rc",
+    cintas_estruturas:"normativas/cintas_estruturas", estruturas_sec:"normativas/estruturas_sec" };
   var usuariosCache = [];
   return {
     tipo:"previa",
@@ -687,7 +688,8 @@ function contextoMecanico(obra){
     caboPrim: obra.caboPrimarioMec||tagPrimarioDaFolha(obra.caboPrimario),
     alturaSec: Number(obra.alturaPosteSec)||Number(par.alturaSecundario)||9,
     alturaPrim: Number(obra.alturaPostePrim)||Number(par.alturaPrimario)||11,
-    angMax9: Number(par.anguloMax9de200)||20
+    angMax9: Number(par.anguloMax9de200)||20,
+    sufixoSec: sufixoSecundario(obra)
   };
 }
 
@@ -709,7 +711,7 @@ function vaosDoPoste(obra,pontoId,ctx){
     var temPrim=t.classificacao==="P";
     var bitola=t.bitola||(obra.caboSecundario||null);
     var tagSec=(t.classificacao==="N")?null:tagSecundario(bitola);
-    var v={indice:i, trecho:t, outro:outro, comprimento:Number(t.comprimento)||0,
+    var v={indice:i, trecho:t, outro:outro, comprimento:Number(t.comprimento)||0, neutro:t.classificacao==="N",
            prim:temPrim?ctx.caboPrim:null, temPrim:temPrim, bitola:bitola, sec:tagSec,
            semTagSec:(!tagSec&&t.classificacao!=="N"&&!!bitola)};
     (temPrim?prim:sec).push(v);
@@ -897,17 +899,16 @@ function calcularPoste(obra,ponto,ctx){
   if(poste&&!posteExiste(altura,poste))
     alertas.push("Não há poste de "+String(altura).replace(".",",")+" m com "+poste+" daN na tabela de postes disponíveis.");
 
-  // Estrutura secundária pelo ângulo entre os dois primeiros vãos.
-  var estSec=null;
-  if(temSec){
-    if(vaos.length===1) estSec="IF";
-    else if(angs[0]!==null){ var es=estruturaPorAngulo(angs[0],"secundaria"); estSec=es?es.estrutura:null; }
-  }
+  // Estrutura secundária pela regra da coluna X da planilha, ou a escolhida no poste.
+  var sec=estruturaSecundaria(vaos,angs,ctx,trafo);
+  var estSec=p.estruturaSecManual?String(p.estruturaSecManual):sec.estrutura;
+  if(!p.estruturaSecManual&&sec.aviso) alertas.push(sec.aviso);
 
   return {id:id, ponto:p, vaos:vaos, nPrim:nPrim, angulos:angs, altura:altura, alturaAuto:alturaAuto,
           geo:geo, F:F, detalhe:detalhe, res:res, R:R, calc:calc, poste:poste,
           nome:poste?nomePoste(altura,poste):null, regra:regra, faixa:faixa,
-          estruturaPrim:est?est.estrutura.CPFL:null, estruturaInfo:est, estruturaSec:estSec,
+          estruturaPrim:est?est.estrutura.CPFL:null, estruturaInfo:est, estruturaSec:estSec, estruturaSecInfo:sec,
+          estruturaSecManual:!!p.estruturaSecManual,
           compacto:compacto, especifico:especifico, estai:temEstai?p.estai:null, caboEstai:caboEstai,
           alertas:alertas};
 }
@@ -917,6 +918,122 @@ function calcularEsforcos(obra){
   var ctx=contextoMecanico(obra);
   return {ctx:ctx, postes:(obra.pontos||[]).map(function(p){ return calcularPoste(obra,p,ctx); })
     .filter(function(r){ return !r.vazio; })};
+}
+
+/* ==========================================================================
+   ESTRUTURA SECUNDÁRIA (coluna X da aba ESFORÇO MECÂNICO)
+
+   1. Os cabos secundários dos vãos 1, 2 e 3 viram um código pela tabela MV:MZ.
+      I quer dizer bitolas iguais, D diferentes, N vão sem cabo numérico
+      (neutro); o dígito é o último da tag do cabo (50 ou 51, por exemplo).
+   2. A deflexão é |ângulo 1–2 + ângulo 2–3 − 180|, em faixas: 0, até 45, até 90
+      (e até 240, que a planilha também põe em 90). Com um vão só é FL.
+   3. Código e faixa dão a estrutura pela tabela NS:NX.
+   Com quatro vãos secundários a planilha não escolhe: pede a estrutura digitada.
+   ========================================================================== */
+function sufixoSecundario(obra){ var v=String((obra&&obra.sufixoSec)||"0"); return v==="1"?"1":"0"; }
+function tagComSufixo(tag,suf){ return tag?String(tag).slice(0,-1)+suf:""; }
+function faixaDeflexaoSec(nVaos,angs){
+  if(nVaos===1) return "FL";
+  if(angs[0]===null||angs[0]===undefined) return null;
+  var d=Math.abs(Number(angs[0])+(angs[1]===null||angs[1]===undefined?0:Number(angs[1]))-180);
+  if(d===0) return "0";
+  if(d<=45) return "45";
+  if(d<=90) return "90";
+  if(d<=240) return "90";
+  return null;
+}
+function estruturaSecundaria(vaos,angs,ctx,trafo){
+  var tab=S.cat.estruturas_sec||{}, conf=tab.configuracoes||[], ests=tab.estruturas||[];
+  var temSec=vaos.some(function(v){ return !!v.sec||v.neutro; });
+  if(!temSec) return {estrutura:null};
+  var suf=ctx.sufixoSec||"0";
+  var cel=vaos.map(function(v){ return v.neutro?"N":(v.sec?tagComSufixo(v.sec,suf):""); });
+  var nSec=cel.filter(Boolean).length;
+  if(nSec>=4)
+    return trafo?{estrutura:"ITA.ITA",codigo:"",faixa:"",motivo:"Poste de transformador com quatro vãos secundários: ITA.ITA, como na planilha."}
+                :{estrutura:null,aviso:"Quatro vãos secundários: a planilha pede a estrutura secundária digitada. Escolha na grade de postes."};
+  if(vaos[0]&&vaos[0].temPrim&&!cel[0])
+    return {estrutura:null,aviso:"O vão 1 tem primário sem secundário: a planilha pede o cabo secundário desse vão."};
+  var chave=(cel[0]||"")+(cel[1]||"")+(cel[2]||"");
+  var codigo=null;
+  conf.some(function(c){ if(c.t1+c.t2+c.t3===chave){ codigo=c.codigo; return true; } return false; });
+  var faixa=faixaDeflexaoSec(vaos.length,angs);
+  if(!codigo) return {estrutura:null,cabos:cel,aviso:"Combinação de cabos secundários "+cel.filter(Boolean).join(" · ")+" fora da tabela da planilha."};
+  if(!faixa) return {estrutura:null,cabos:cel,codigo:codigo,aviso:vaos.length>1?null:"Sem deflexão para a estrutura secundária."};
+  var est=null;
+  ests.some(function(e){ if(e.alteracao+e.t1+e.t2+e.t3+e.deflexao===""+codigo+faixa){ est=e.estrutura; return true; } return false; });
+  if(!est) return {estrutura:null,cabos:cel,codigo:codigo,faixa:faixa,aviso:"Código "+codigo+" com deflexão "+faixa+" fora da tabela de estruturas secundárias."};
+  return {estrutura:est,cabos:cel,codigo:codigo,faixa:faixa};
+}
+
+/* ==========================================================================
+   CINTAS E SUPORTE DE TRANSFORMADOR (aba CINTAS E SUPORTE TRAFO)
+
+   Cada poste gera até cinco chaves, todas com o tipo de poste na frente, como
+   as colunas DN a DR da planilha: estrutura primária, estai cruzeta-poste,
+   estai poste-poste, estrutura secundária e braço de iluminação pública.
+   Cada chave aponta para as posições de cinta, medidas do topo. O diâmetro da
+   cinta é o do poste naquele ponto: topo + distância × 0,02.
+   ========================================================================== */
+function estruturasSecundariasDisponiveis(){
+  var vistos={}, l=[];
+  items("cintas_estruturas").forEach(function(x){ if(x.tipo==="secundária"&&!vistos[x.estrutura]){ vistos[x.estrutura]=1; l.push(x.estrutura); } });
+  return l.sort();
+}
+function linhaCinta(bitola,estrutura){
+  var r=null;
+  items("cintas_estruturas").some(function(x){ if(x.bitola===String(bitola)&&x.estrutura===String(estrutura)){ r=x; return true; } return false; });
+  return r;
+}
+/* Luminária do poste como a coluna AA monta: a do tipo 2 tem prioridade; com
+   mais de uma vira "2x…", e aí a primeira letra não aponta braço nenhum. */
+function luminariaDoPoste(obra,p){
+  var n2=Number(p.lumT2)||0, n1=Number(p.lumT1)||0;
+  if(n2>0) return (n2===1?"":n2+"x")+(obra.luminaria2||"");
+  if(n1>0) return (n1===1?"":n1+"x")+(obra.luminaria||"");
+  return "";
+}
+function cintasDoPoste(obra,r){
+  var out={id:r.id, poste:r.nome, chaves:[], alertas:[], suportes:{}};
+  if(!r.nome) return out;
+  var bitola=r.nome;
+  var pedidos=[];
+  if(r.estruturaPrim) pedidos.push({tipo:"Estrutura primária",estrutura:r.estruturaPrim});
+  if(r.estai) pedidos.push({tipo:r.estai==="ECP"?"Estai cruzeta a poste":"Estai poste a poste",estrutura:r.estai});
+  if(r.estruturaSec) pedidos.push({tipo:"Estrutura secundária",estrutura:r.estruturaSec});
+  var lum=luminariaDoPoste(obra,r.ponto);
+  if(lum){
+    var letra=lum.charAt(0);
+    if(/[0-9]/.test(letra)) out.alertas.push("Mais de uma luminária no poste ("+lum+"): a planilha não traz cinta de braço para esse caso.");
+    else pedidos.push({tipo:"Braço de iluminação pública",estrutura:letra,luminaria:lum});
+  }
+  var topo=null;
+  items("cintas").forEach(function(x){ if(String(x.bitola)===bitola) topo=Number(x.diamTopo); });
+  if(topo===null&&pedidos.length) out.alertas.push("Poste "+bitola+" sem diâmetro de topo no cadastro de cintas.");
+  pedidos.forEach(function(q){
+    var l=linhaCinta(bitola,q.estrutura);
+    if(!l){ out.alertas.push("Sem cintas na tabela para "+bitola+" com "+q.estrutura+"."); return; }
+    var cintas=(topo===null)?[]:l.posicoes.map(function(pos){
+      var dia=topo+pos*conicidadePadrao();
+      return {posicao:pos, diametro:dia, cinta:cintaPara(dia)};
+    });
+    Object.keys(l.suportes||{}).forEach(function(d){ out.suportes[d]=(out.suportes[d]||0)+Number(l.suportes[d]); });
+    out.chaves.push({tipo:q.tipo, estrutura:q.estrutura, chave:bitola+q.estrutura, luminaria:q.luminaria||null,
+                     cintas:cintas, suportes:l.suportes||{}});
+  });
+  return out;
+}
+/* Todas as cintas e suportes da obra, por poste e somados por diâmetro. */
+function calcularCintas(obra){
+  var mec=calcularEsforcos(obra);
+  var postes=mec.postes.map(function(r){ return {esforco:r, cintas:cintasDoPoste(obra,r)}; });
+  var porDiametro={}, suportes={};
+  postes.forEach(function(x){
+    x.cintas.chaves.forEach(function(k){ k.cintas.forEach(function(c){ porDiametro[c.cinta]=(porDiametro[c.cinta]||0)+1; }); });
+    Object.keys(x.cintas.suportes).forEach(function(d){ suportes[d]=(suportes[d]||0)+x.cintas.suportes[d]; });
+  });
+  return {ctx:mec.ctx, postes:postes, porDiametro:porDiametro, suportes:suportes};
 }
 
 /* ==========================================================================
@@ -1116,7 +1233,20 @@ function totalCampos(o){
   return n;
 }
 // A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.
-function cintaPara(diametro){ return Math.ceil((diametro-5)/10)*10; }
+/* A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm:
+   até 5 mm acima da dezena arredonda para baixo, como a coluna G da tabela da
+   planilha faz. O diâmetro é limpo antes, senão 205,000000000003 viraria 210. */
+function cintaPara(diametro){ var d=Math.round(Number(diametro)*1e6)/1e6; return Math.ceil((d-5)/10)*10; }
+/* Conicidade usada no diâmetro do poste. A tabela da planilha aplica 0,02 mm
+   por mm em todas as bitolas (coluna F: topo + distância × 0,02), e não a
+   diferença entre base e topo de cada uma. */
+function conicidadePadrao(){ var c=S.cat&&S.cat.cintas&&Number(S.cat.cintas.conicidade); return c>0?c:0.02; }
+/* Diâmetro do poste a uma distância do topo, em mm. */
+function diametroNoPoste(bitola,distancia){
+  var r=null; items("cintas").forEach(function(x){ if(String(x.bitola)===String(bitola)) r=x; });
+  if(!r) return null;
+  return Number(r.diamTopo)+Number(distancia)*conicidadePadrao();
+}
 var QTD_PONTOS=10;
 // Diâmetro e cinta em cada ponto de fixação declarado para a bitola.
 function pontosDe(r){
@@ -1133,7 +1263,7 @@ function pontosDe(r){
 }
 function recalcularBitola(r){
   var altura=Number(r.altura)||0, topo=Number(r.diamTopo)||0, base=Number(r.diamBase)||0;
-  r.conicidade = altura>0 ? Number(((base-topo)/(altura*1000)).toFixed(5)) : 0;
+  r.conicidade = conicidadePadrao();
   r.maxDist = altura*1000;
   var faixas=[], atual=null;
   for(var d=0; d<=altura*1000; d+=10){
@@ -1182,6 +1312,9 @@ async function carregar(){
   try{
     var d=await Store.carregar();
     S.cat=d.catalogos||{}; S.obras=(d.obras||[]).map(migrarConselho); S.usuarios=d.usuarios||[];
+    // A conicidade e as faixas de cinta são derivadas: refeitas na carga, para o
+    // cadastro gravado antes da correção da conicidade já aparecer certo.
+    items("cintas").forEach(recalcularBitola);
     S.precisaPrimeiro=!!d.precisaPrimeiroAcesso;
     if(d.sessao) S.sess=d.sessao;
     S.offline=false;
@@ -1295,7 +1428,10 @@ var MENU=[
    {r:"postes_cap",l:"Postes — capacidade útil",c:"postes"},
    {r:"postes_geo",l:"Postes — geometria",c:"postes"},
    {r:"postes_disp",l:"Postes — alturas disponíveis",c:"postes"},
-   {r:"estruturas_rc",l:"Estruturas da rede compacta",c:"estruturas_rc"}]},
+   {r:"estruturas_rc",l:"Estruturas da rede compacta",c:"estruturas_rc"},
+   {r:"est_sec_cod",l:"Estrutura secundária — códigos",c:"estruturas_sec"},
+   {r:"est_sec_tab",l:"Estrutura secundária — por deflexão",c:"estruturas_sec"},
+   {r:"cintas_est",l:"Cintas por estrutura",c:"cintas_estruturas"}]},
  {grp:"Administração",itens:[{r:"usuarios",l:"Usuários e perfis"},{r:"registro",l:"Registro de operações"}]}
 ];
 function grupoPorNome(n){ var r=null; MENU.forEach(function(g){ if(g.grp===n) r=g; }); return r; }
@@ -1419,7 +1555,7 @@ function sincronizarDerivados(o){
   var me=municipioInfo(o.munEmp);       if(me) o.ufEmp=me.uf;
   return o;
 }
-function emObra(){ return S.route==="folha"||S.route==="topologia"||S.route==="queda"||S.route==="esforco"; }
+function emObra(){ return S.route==="folha"||S.route==="topologia"||S.route==="queda"||S.route==="esforco"||S.route==="cintasobra"; }
 function marcarSujo(){
   var bar=document.querySelector(".salvabar");
   if(bar&&!bar.classList.contains("sujo")){
@@ -1573,11 +1709,12 @@ function campoHTML(c,o,errs){
 }
 
 /* Cabeçalho comum das telas de uma obra: título, abas e barra de gravação. */
-var ABAS_OBRA=[{r:"folha",l:"Folha de dados"},{r:"topologia",l:"Vãos entre pontos"},{r:"queda",l:"Queda de tensão"},{r:"esforco",l:"Esforço mecânico"}];
+var ABAS_OBRA=[{r:"folha",l:"Folha de dados"},{r:"topologia",l:"Vãos entre pontos"},{r:"queda",l:"Queda de tensão"},{r:"esforco",l:"Esforço mecânico"},{r:"cintasobra",l:"Cintas e suporte"}];
 function cabecalhoObra(o,desc){
   var h='<div class="phead"><div><h2>'+esc(o.empreendimento||"Nova obra")+"</h2>"+
     '<p class="desc">'+esc(desc)+"</p></div>"+
-    '<div class="actions"><button class="btn ghost" id="btnVoltar">Voltar para obras</button></div></div>';
+    '<div class="actions"><button class="btn ghost" id="btnAuditoria">Auditoria de cálculo</button>'+
+    '<button class="btn ghost" id="btnVoltar">Voltar para obras</button></div></div>';
   h+='<div class="tabs">'+ABAS_OBRA.map(function(a){
     return '<button data-aba="'+a.r+'" class="'+(S.route===a.r?"on":"")+'">'+esc(a.l)+"</button>"; }).join("")+"</div>";
   var sujo=folhaAlterada();
@@ -1983,6 +2120,10 @@ function viewEsforco(){
         (o.caboPrimario?"A folha indica "+esc(o.caboPrimario)+", que não é uma tag da GED 3648: escolha aqui.":"Escolha o cabo dos vãos primários."))+"</div></div>"+
     '<div class="fld c2"><label>Altura do poste com primário</label>'+opAlt("alturaPostePrim",[11,12],par.alturaPrimario||11)+"</div>"+
     '<div class="fld c2"><label>Altura do poste só com secundário</label>'+opAlt("alturaPosteSec",[9,10.5,11,12],par.alturaSecundario||9)+"</div>"+
+    '<div class="fld c2"><label>Final da tag do cabo secundário</label><select data-mec="sufixoSec"'+(ed?"":" disabled")+">"+
+      [["0","0 (50, 70, 120…)"],["1","1 (51, 71, 121…)"]].map(function(x){
+        return '<option value="'+x[0]+'"'+(ctx.sufixoSec===x[0]?" selected":"")+">"+x[1]+"</option>"; }).join("")+"</select>"+
+      '<div class="drv">O último dígito que se digita na coluna J da planilha. Muda só o nome da estrutura secundária.</div></div>'+
     "</div></div></div>";
 
   if(!o.trechos.length){
@@ -2007,7 +2148,10 @@ function viewEsforco(){
     {k:"alturaPoste",l:"Altura",w:110,ops:opsAlt,vazio:"Automática"},
     {k:"estai",l:"Estai",w:120,ops:function(){ return [["ECP","Cruzeta a poste"],["EPP","Poste a poste"]]; },vazio:"Sem estai"},
     {k:"caboEstai",l:"Cabo do estai",w:130,vazio:"Primário da obra",ops:function(){ return cabos.map(function(x){ return [x.tag,x.tag]; }); }},
-    {k:"calcEspecifico",l:"Vão real",w:100,ops:function(){ return [["Sim","Sim"]]; },vazio:"Não"}
+    {k:"calcEspecifico",l:"Vão real",w:100,ops:function(){ return [["Sim","Sim"]]; },vazio:"Não"},
+    {k:"estruturaSecManual",l:"Estrutura secundária",w:150,vazio:"Automática",ops:function(r){
+      var c=porId[String(r.id)], auto=c&&c.estruturaSecInfo&&c.estruturaSecInfo.estrutura;
+      return estruturasSecundariasDisponiveis().map(function(e){ return [e,e+(e===auto?" (a da regra)":"")]; }); }}
   ];
   cols.pula=function(r){ return !porId[String(r.id)]; };
   h+=grade("Postes","Ângulo entre vãos como na planilha: 180° é linha reta. Com dois vãos e nada digitado vale 180°. "+
@@ -2038,8 +2182,9 @@ function viewEsforco(){
         '<td class="num">'+(r.vaos.length===1?"FL":fmtAng(r.angulos[0]))+'</td><td class="num">'+fmtAng(r.angulos[1])+
         '</td><td class="num">'+fmtAng(r.angulos[2])+'</td><td class="num"><strong>'+(r.R===null?"—":num(r.R,1))+"</strong></td>"+
         "<td>"+(r.nome?'<strong class="mono">'+esc(r.nome)+'</strong> <span style="color:var(--muted);font-size:11.5px">'+r.poste+" daN</span>":"—")+"</td>"+
-        '<td class="mono">'+esc(r.estruturaPrim||"—")+'</td><td class="mono">'+esc(r.estruturaSec||"—")+"</td></tr>"+
-        (r.alertas.length?'<tr class="fora"><td></td><td colspan="15" style="font-size:12px;color:var(--bad)">'+
+        '<td class="mono">'+esc(r.estruturaPrim||"—")+'</td><td class="mono">'+esc(r.estruturaSec||"—")+
+        (r.estruturaSecManual?' <span class="pill">manual</span>':"")+"</td></tr>"+
+        (r.alertas.length?'<tr class="fora"><td></td><td colspan="15" style="font-size:12px;color:var(--alert)">'+
           r.alertas.map(esc).join("<br>")+"</td></tr>":"");
     }).join("")+"</tbody></table></div></div>";
 
@@ -2071,6 +2216,1065 @@ function viewEsforco(){
     ". Valem os mínimos da planilha: 9 m em ângulo acima de "+ctx.angMax9+"° é 9/4, 12 m é no mínimo 400, "+
     "secundário de 120 mm² é no mínimo 400 e a estrutura da rede compacta impõe a capacidade mínima dela.</p>";
   return h;
+}
+
+/* ==========================================================================
+   CINTAS E SUPORTE — tela
+   ========================================================================== */
+function viewCintasObra(){
+  var o=S.rascunho;
+  if(!o) return '<div class="empty"><h4>Obra não encontrada</h4></div>';
+  o.trafos=o.trafos||[]; o.pontos=o.pontos||[]; o.trechos=o.trechos||[];
+  var h=cabecalhoObra(o,"Cintas de cada poste e suporte de transformador, pela tabela de cintas da planilha.");
+  var c=calcularCintas(o);
+  var comPoste=c.postes.filter(function(x){ return x.esforco.nome; });
+  if(!c.postes.length)
+    return h+'<div class="panel"><div class="empty"><h4>Nenhum poste com vãos</h4>'+
+      "<p>As cintas saem do tipo de poste e das estruturas calculados na aba de esforço mecânico.</p></div></div>";
+
+  /* Totais por diâmetro: é o que vai para a lista de materiais. */
+  var diams=Object.keys(c.porDiametro).map(Number).sort(function(a,b){ return a-b; });
+  var sups=Object.keys(c.suportes).map(Number).sort(function(a,b){ return a-b; });
+  var totC=diams.reduce(function(s,d){ return s+c.porDiametro[d]; },0);
+  var totS=sups.reduce(function(s,d){ return s+c.suportes[d]; },0);
+  h+='<div class="grid g2" style="gap:14px;margin-bottom:14px">'+
+    '<div class="panel"><div class="panel-h"><div><h3>Cintas por diâmetro</h3><p class="sub">'+totC+" cinta"+(totC===1?"":"s")+" na obra</p></div></div>"+
+    (diams.length?'<div class="tbl-wrap"><table><thead><tr><th class="num">Diâmetro da cinta (mm)</th><th class="num">Quantidade</th></tr></thead><tbody>'+
+      diams.map(function(d){ return '<tr><td class="num mono">'+d+'</td><td class="num"><strong>'+c.porDiametro[d]+"</strong></td></tr>"; }).join("")+
+      '<tr><td class="num"><strong>Total</strong></td><td class="num"><strong>'+totC+"</strong></td></tr></tbody></table></div>":
+      '<div class="empty" style="padding:22px"><p>Nenhuma cinta calculada ainda.</p></div>')+"</div>"+
+    '<div class="panel"><div class="panel-h"><div><h3>Suporte de transformador</h3><p class="sub">'+totS+" suporte"+(totS===1?"":"s")+" na obra</p></div></div>"+
+    (sups.length?'<div class="tbl-wrap"><table><thead><tr><th class="num">Diâmetro do suporte (mm)</th><th class="num">Quantidade</th></tr></thead><tbody>'+
+      sups.map(function(d){ return '<tr><td class="num mono">'+d+'</td><td class="num"><strong>'+c.suportes[d]+"</strong></td></tr>"; }).join("")+"</tbody></table></div>":
+      '<div class="empty" style="padding:22px"><p>Nenhum poste de transformador com suporte na tabela.</p></div>')+"</div></div>";
+
+  /* Por poste: cada estrutura, com as posições e o diâmetro da cinta em cada uma. */
+  var comAviso=c.postes.filter(function(x){ return x.cintas.alertas.length||!x.esforco.nome; }).length;
+  h+='<div class="panel" style="margin-bottom:14px"><div class="panel-h"><div><h3>Cintas por poste</h3>'+
+    '<p class="sub">Posição medida do topo do poste. Diâmetro no ponto = topo + posição × '+num(conicidadePadrao(),2)+".</p></div>"+
+    "<div>"+(comAviso?'<span class="chip warn">'+comAviso+" poste"+(comAviso>1?"s":"")+" com aviso</span>":'<span class="chip ok">sem avisos</span>')+"</div></div>"+
+    '<div class="tbl-wrap"><table><thead><tr><th>Poste</th><th>Tipo de poste</th><th>Estrutura</th><th>Chave na tabela</th>'+
+    '<th class="num">Posição (mm)</th><th class="num">Ø no poste (mm)</th><th class="num">Cinta (mm)</th><th>Suporte</th></tr></thead><tbody>'+
+    c.postes.map(function(x){
+      var r=x.esforco, k=x.cintas, p=r.ponto;
+      var cab='<td class="mono"><strong>'+esc(r.id)+"</strong>"+(p.letra?' <span class="pill">'+esc(String(p.letra).toUpperCase())+"</span>":"")+"</td>";
+      if(!r.nome)
+        return "<tr"+' class="fora">'+cab+'<td colspan="7" style="font-size:12px">Sem tipo de poste: resolva o esforço mecânico deste poste primeiro.</td></tr>';
+      var linhas=[];
+      k.chaves.forEach(function(ch){
+        var sup=Object.keys(ch.suportes||{}).map(function(d){ return ch.suportes[d]+"× Ø"+d; }).join(", ");
+        ch.cintas.forEach(function(ci,j){
+          linhas.push("<td>"+(j===0?esc(ch.tipo)+' <span class="mono" style="color:var(--muted)">'+esc(ch.estrutura)+"</span>"+
+              (ch.luminaria?' <span style="font-size:11.5px;color:var(--muted)">'+esc(ch.luminaria)+"</span>":""):"")+"</td>"+
+            '<td class="mono" style="color:var(--muted);font-size:12px">'+(j===0?esc(ch.chave):"")+"</td>"+
+            '<td class="num">'+num(ci.posicao,0)+'</td><td class="num">'+num(ci.diametro,1)+'</td><td class="num"><strong>'+ci.cinta+"</strong></td>"+
+            "<td>"+(j===0&&sup?esc(sup):"")+"</td>");
+        });
+      });
+      var n=linhas.length, out="";
+      if(!n) out="<tr>"+cab+'<td class="mono">'+esc(r.nome)+'</td><td colspan="6" style="color:var(--muted);font-size:12px">Nenhuma cinta para este poste.</td></tr>';
+      linhas.forEach(function(l,i){
+        out+="<tr>"+(i===0?cab.replace("<td",'<td rowspan="'+n+'"')+'<td rowspan="'+n+'" class="mono"><strong>'+esc(r.nome)+"</strong></td>":"")+l+"</tr>";
+      });
+      if(k.alertas.length) out+='<tr class="fora"><td></td><td colspan="7" style="font-size:12px;color:var(--alert)">'+k.alertas.map(esc).join("<br>")+"</td></tr>";
+      return out;
+    }).join("")+"</tbody></table></div></div>";
+
+  h+='<p class="note">Cada poste gera uma chave por estrutura montada nele, com o tipo de poste na frente: estrutura primária, '+
+    "estai, estrutura secundária e braço de iluminação pública (a primeira letra do modelo da luminária). A chave aponta "+
+    "as posições de cinta na tabela da planilha, editável em Tabelas normativas, Cintas por estrutura. A cinta é o menor "+
+    "múltiplo de 10 mm que acomoda o diâmetro do poste no ponto, arredondando para baixo até 5 mm.</p>";
+  return h;
+}
+
+/* ==========================================================================
+   AUDITORIA DE CÁLCULO
+
+   Cada tela com conta tem o botão "Auditoria de cálculo". Ele abre o passo a
+   passo: a regra, a regra com os números desta obra, o resultado e de onde
+   veio cada valor (folha de dados, cadastro, tabela normativa ou planilha).
+
+   As contas são refeitas aqui, à parte do motor, e comparadas com o que a
+   tela mostra. Se algum valor não bater, o passo fica marcado e o rodapé diz
+   quantos. É a garantia de que o passo a passo descreve a mesma conta que a
+   tela fez. As consultas a tabelas (tração, coeficiente, geometria) usam as
+   mesmas funções de busca da tela: o que se confere é a aritmética e a regra.
+   ========================================================================== */
+var AUD_TITULO={folha:"Folha de dados",topologia:"Demanda e transformadores",queda:"Queda de tensão",
+  esforco:"Esforço mecânico",cintasobra:"Cintas e suporte",cintas:"Diâmetro de poste e cintas"};
+var NOME_CLASSE={S:"Secundária",P:"Primária",IP:"Iluminação pública",M:"Mergulho",N:"Neutro"};
+
+function audVazio(v){ return v===null||v===undefined||v===""; }
+function audIgual(a,b){
+  if(audVazio(a)||audVazio(b)) return audVazio(a)&&audVazio(b);
+  var x=Number(a), y=Number(b);
+  var numerico=(typeof a==="number"||typeof b==="number"||typeof a==="boolean"||typeof b==="boolean")&&!isNaN(x)&&!isNaN(y);
+  if(numerico) return Math.abs(x-y)<=1e-6*Math.max(1,Math.abs(x),Math.abs(y));
+  return String(a)===String(b);
+}
+function audN(v){
+  if(audVazio(v)) return "vazio";
+  if(typeof v==="boolean") return v?"sim":"não";
+  if(typeof v==="number") return v.toLocaleString("pt-BR",{maximumFractionDigits:6});
+  return String(v);
+}
+function audAng(a){ return audVazio(a)?"—":num(Number(a))+"°"; }
+
+function novaAuditoria(){
+  var a={itens:[],difs:[],conferidos:0,n:0,vistos:{}};
+  a.sec=function(t,sub){ a.itens.push({sec:t,sub:sub||""}); };
+  a.passo=function(p){ a.n++; p.n=a.n; p.difs=[]; a.itens.push(p); return p; };
+  /* Compara o valor refeito aqui com o da tela. O mesmo rótulo conferido duas
+     vezes (no detalhe e no resumo) conta uma vez só no rodapé. */
+  a.confere=function(p,rotulo,refeito,tela){
+    var igual=audIgual(refeito,tela), novo=!a.vistos[rotulo];
+    a.vistos[rotulo]=1;
+    if(novo) a.conferidos++;
+    if(igual) return true;
+    var d={rotulo:rotulo,refeito:audN(refeito),tela:audN(tela)};
+    if(p) p.difs.push(d);
+    if(novo) a.difs.push(d);
+    return false;
+  };
+  return a;
+}
+
+function audTabela(t){
+  var ehNum=function(i){ return (t.num||[]).indexOf(i)>=0; };
+  return '<div class="aud-tab"><table><thead><tr>'+t.cab.map(function(c,i){
+      return "<th"+(ehNum(i)?' class="num"':"")+">"+esc(c)+"</th>"; }).join("")+"</tr></thead><tbody>"+
+    t.linhas.map(function(l){
+      var cel=Array.isArray(l)?l:l.cel, cls=[];
+      if(l.marca) cls.push("aud-marca");
+      if(l.dif) cls.push("fora");
+      return "<tr"+(cls.length?' class="'+cls.join(" ")+'"':"")+">"+cel.map(function(c,i){
+        return "<td"+(ehNum(i)?' class="num"':"")+">"+esc(audVazio(c)?"—":c)+"</td>"; }).join("")+"</tr>"; }).join("")+
+    "</tbody></table></div>";
+}
+function audCorpo(a){
+  return a.itens.map(function(x){
+    if(x.sec) return '<div class="aud-sec"><h4>'+esc(x.sec)+"</h4>"+(x.sub?"<p>"+esc(x.sub)+"</p>":"")+"</div>";
+    return '<div class="aud-passo'+(x.difs.length?" dif":"")+'"><div class="aud-n">'+String(x.n).padStart(2,"0")+'</div><div class="aud-c">'+
+      '<div class="aud-t">'+esc(x.t)+"</div>"+
+      (x.txt?'<p class="aud-txt">'+esc(x.txt)+"</p>":"")+
+      (x.f?'<div class="aud-regra"><span>Regra</span>'+esc(x.f)+"</div>":"")+
+      (x.v?'<div class="aud-conta"><span>Com os números da obra</span>'+esc(x.v)+"</div>":"")+
+      (x.tab&&x.tab.linhas.length?audTabela(x.tab):"")+
+      (audVazio(x.r)?"":'<div class="aud-r">Resultado<b>'+esc(x.r)+"</b></div>")+
+      (x.fonte?'<div class="aud-fonte">Fonte: '+esc(x.fonte)+"</div>":"")+
+      (x.alerta?'<div class="aud-alerta">'+esc(x.alerta)+"</div>":"")+
+      x.difs.map(function(d){ return '<div class="aud-alerta">Conferência: '+esc(d.rotulo)+" refeito aqui dá "+esc(d.refeito)+
+        ", a tela mostra "+esc(d.tela)+".</div>"; }).join("")+
+      "</div></div>";
+  }).join("");
+}
+function audSelect(rotulo,chave,ops,valor){
+  return '<div class="fld"><label>'+esc(rotulo)+'</label><select data-aud="'+chave+'">'+ops.map(function(p){
+    return '<option value="'+esc(p[0])+'"'+(String(p[0])===String(valor)?" selected":"")+">"+esc(p[1])+"</option>"; }).join("")+"</select></div>";
+}
+function audCorte(ctx){ return ctx.funcao+" com "+ctx.casas+" casa"+(ctx.casas===1?"":"s"); }
+
+/* ---------- folha de dados ---------- */
+function audFolha(a,o){
+  var mi=municipioInfo(o.municipio);
+  a.sec("Município da obra","O município aponta a concessionária, as constantes e as tensões usadas em todas as contas.");
+  a.passo({t:"Dados trazidos pelo município",
+    tab:mi?{cab:["Campo","Valor"],linhas:[["Município",mi.municipio],["UF",mi.uf],["Concessionária",mi.concessionaria],
+      ["Tensão primária nominal",num(mi.tensaoPrimNominal,1)+" kV"],["Classe de tensão",num(mi.classe15_25,0)+" kV"],
+      ["Tensão secundária",num(mi.tensaoSecFF,0)+" / "+num(mi.tensaoSecFN,0)+" V"]]}:null,
+    fonte:"Cadastros base, Municípios e constantes",
+    alerta:mi?null:(o.municipio?"O município "+o.municipio+" não está no cadastro: as contas que dependem dele ficam vazias.":"Município da obra não preenchido.")});
+  if(mi){
+    var c=concessionariaInfo(mi.concessionaria);
+    a.passo({t:"Constantes A e B",
+      txt:"Entram na fórmula de demanda, kVA = A × (kWh)^B. Pertencem à concessionária: o município só aponta para ela.",
+      tab:{cab:["Concessionária","Constante A","Constante B"],num:[1,2],linhas:[[mi.concessionaria,c?num(c.constA,4):"—",c?num(c.constB,4):"—"]]},
+      fonte:"Cadastros base, Concessionárias",
+      alerta:c?null:"A concessionária "+mi.concessionaria+" não está cadastrada."});
+  }
+
+  a.sec("Consumo estimado","Painel Consumo estimado: o consumo de cada tipo de consumidor pelo Anexo 1.");
+  var total=0, partes=[];
+  [["1",o.atividadeT1,o.ligacaoT1,Number(o.qtdT1)||0],["2",o.atividadeT2,o.ligacaoT2,Number(o.qtdT2)||0]].forEach(function(l){
+    if(!l[1]) return;
+    var k=consumoAnexo1(l[1],l[2]), sub=(k||0)*l[3];
+    total+=sub; partes.push(num(sub));
+    a.passo({t:"Consumidor tipo "+l[0],
+      f:"Total do tipo = consumo por consumidor no Anexo 1 × quantidade de consumidores",
+      v:k===null?null:"Total = "+num(k)+" × "+num(l[3])+" = "+num(sub)+" kWh/mês",
+      tab:{cab:["Tipo de empreendimento","Ligação","kWh/mês por consumidor"],num:[2],
+        linhas:[[l[1],l[2]?nomeLigacao(l[2]):"—",k===null?"não previsto":num(k)]]},
+      r:k===null?null:num(sub)+" kWh/mês",
+      fonte:"Tabelas normativas, Anexo 1 ("+rotuloRevisao("anexo1")+")",
+      alerta:k===null?(l[2]?"O Anexo 1 não prevê essa ligação para esse tipo de empreendimento: o consumo deste tipo fica fora da conta.":"Ligação não escolhida."):null});
+  });
+  var pt=a.passo({t:"Consumo total do empreendimento",f:"Total = tipo 1 + tipo 2",
+    v:partes.length?"Total = "+partes.join(" + ")+" = "+num(total)+" kWh/mês":null,
+    r:num(total)+" kWh/mês", txt:"O mesmo total aparece no rodapé da demanda, na aba Vãos entre pontos."});
+  a.confere(pt,"Consumo total",total,consumoLoteamento(o));
+
+  a.sec("Fatores do tipo de empreendimento");
+  var e=empreendimentoInfo(o.tipoEmpreendimento);
+  a.passo({t:"Fator de potência",
+    txt:"Corrige a parcela dos consumidores na demanda e escolhe a coluna da queda unitária do cabo.",
+    tab:{cab:["Tipo de empreendimento","Fator de potência"],num:[1],linhas:[[o.tipoEmpreendimento||"—",num(e?e.fatorPotencia:1,2)]]},
+    r:num(e?e.fatorPotencia:1,2),
+    fonte:e?"Tabelas normativas, Tipos de empreendimento":"Tipo de empreendimento sem cadastro: vale 1."});
+  var fc, origem;
+  if(o.fatorCarreg){ fc=Number(o.fatorCarreg); origem="Digitado na folha, em Parâmetros de cálculo"; }
+  else if(e&&e.kvatAdmissivel){ fc=Number(e.kvatAdmissivel); origem="Tabelas normativas, Tipos de empreendimento ("+e.tipo+")"; }
+  else {
+    var tf=S.cat.trafos&&S.cat.trafos.fatores, nuc=/núcleo/i.test(o.tipoEmpreendimento||"");
+    var vf=tf&&(nuc?tf["Núcleo habitacional"]:tf["Loteamento"]);
+    if(vf){ fc=Number(vf); origem="Tabelas normativas, Transformadores (fator de "+(nuc?"núcleo habitacional":"loteamento")+")"; }
+    else { fc=1.5; origem="Sem cadastro: vale 1,5"; }
+  }
+  var pfc=a.passo({t:"Fator de carregamento do transformador",f:"KVAT = fator × KVAN",
+    txt:"Potência que o transformador pode carregar: a nominal (KVAN) vezes o fator. Em branco na folha, vale o do tipo de empreendimento.",
+    r:num(fc,3),fonte:origem});
+  a.confere(pfc,"Fator de carregamento",fc,fatorCarregamento(o));
+
+  a.sec("Indicador de preenchimento","Barra de porcentagem no alto da folha.");
+  var errs=validarObra(o), tot=totalCampos(o), pend=errs.filter(function(x){ return x.tipo==="obrigatorio"; }).length;
+  a.passo({t:"Preenchimento da folha",
+    f:"% = (campos visíveis − obrigatórios em branco) ÷ campos visíveis × 100, arredondado",
+    v:"% = ("+tot+" − "+pend+") ÷ "+tot+" × 100 = "+num((tot-pend)/tot*100,2),
+    r:Math.round((tot-pend)/tot*100)+" %",
+    txt:"Os campos visíveis dependem do tipo de pessoa: pessoa física não tem representantes legais, por exemplo."});
+  return {};
+}
+
+/* ---------- demanda (vãos entre pontos) ---------- */
+/* Pontos alimentados pelo transformador, refeitos à parte do motor. */
+function audCircuito(o,trafoId){
+  var tr=null; (o.trafos||[]).forEach(function(x){ if(String(x.id)===String(trafoId)) tr=x; });
+  var raiz=tr&&tr.ponto?String(tr.ponto):null;
+  var pts={}; (o.pontos||[]).forEach(function(p){ pts[String(p.id)]=p; });
+  var filhos={};
+  (o.trechos||[]).forEach(function(t){
+    if(String(t.trafo||"")!==String(trafoId)||!t.de||!t.para) return;
+    (filhos[String(t.de)]=filhos[String(t.de)]||[]).push(t);
+  });
+  var ordem=[], visto={};
+  if(raiz){
+    var fila=[raiz];
+    while(fila.length){
+      var k=fila.shift(); if(visto[k]) continue;
+      visto[k]=1; ordem.push(k);
+      (filhos[k]||[]).forEach(function(t){ fila.push(String(t.para)); });
+    }
+  }
+  return {trafo:tr,raiz:raiz,pts:pts,filhos:filhos,ordem:ordem};
+}
+function audRefazDemanda(o,trafoId){
+  var ctx=contextoCalculo(o), c=audCircuito(o,trafoId);
+  var lista=c.ordem.map(function(k){ return c.pts[k]; }).filter(Boolean);
+  var s={c1:0,c2:0,l1:0,l2:0,esp:0,nEsp:0};
+  lista.forEach(function(p){
+    s.c1+=Number(p.consT1)||0; s.c2+=Number(p.consT2)||0; s.l1+=Number(p.lumT1)||0; s.l2+=Number(p.lumT2)||0;
+    var ce=Number(p.cargaEspecial)||0; s.esp+=ce; if(ce>0) s.nEsp++;
+  });
+  var nx=s.c1+s.c2+s.nEsp, kwh=s.c1*(ctx.kwh1||0)+s.c2*(ctx.kwh2||0);
+  var ok=!!(nx&&ctx.constA&&ctx.constB&&kwh);
+  var bruto=ok?ctx.constA*Math.pow(kwh,ctx.constB):0;
+  var fp=ctx.fatorPotencia||1;
+  var kvas=ok?cortar(bruto/nx,ctx.funcao,ctx.casas):0;
+  var parcCons=(s.c1+s.c2)*kvas/fp;
+  var diurna=cortar(parcCons+s.esp,ctx.funcao,ctx.casas);
+  var ilum=s.l1*ctx.potLum1+s.l2*ctx.potLum2;
+  return {ctx:ctx,c:c,lista:lista,s:s,nx:nx,kwh:kwh,ok:ok,bruto:bruto,fp:fp,
+    grupo:ok?cortar(bruto,ctx.funcao,ctx.casas):0,kvas:kvas,parcCons:parcCons,
+    diurna:diurna,ilum:ilum,noturna:cortar(diurna+ilum,ctx.funcao,ctx.casas)};
+}
+function audCargaPonto(p,ctx,kvas){
+  return ((Number(p.consT1)||0)+(Number(p.consT2)||0))*kvas+(Number(p.lumT1)||0)*ctx.potLum1+
+         (Number(p.lumT2)||0)*ctx.potLum2+(Number(p.cargaEspecial)||0);
+}
+function audContaCarga(p,ctx,kvas){
+  var cs=(Number(p.consT1)||0)+(Number(p.consT2)||0);
+  return cs+" × "+num(kvas,ctx.casas)+" + "+(Number(p.lumT1)||0)+" × "+num(ctx.potLum1,3)+" + "+
+    (Number(p.lumT2)||0)+" × "+num(ctx.potLum2,3)+" + "+num(Number(p.cargaEspecial)||0,2);
+}
+function audTrafoEscolhido(o,aud){
+  var ts=o.trafos||[]; if(!ts.length) return null;
+  var id=aud.alvo;
+  if(!ts.some(function(t){ return String(t.id)===String(id); })) id=ts[0].id;
+  aud.alvo=String(id);
+  return ts.filter(function(t){ return String(t.id)===String(id); })[0];
+}
+function audSeletorTrafo(o,tr){
+  return audSelect("Transformador","alvo",(o.trafos||[]).map(function(t){
+    return [t.id,"Transformador "+t.id+(t.potencia?" · "+num(t.potencia,1)+" kVA":"")]; }),tr.id);
+}
+
+function audDemanda(a,o,aud){
+  var tr=audTrafoEscolhido(o,aud);
+  if(!tr) return {aviso:"Nenhum transformador lançado. A conta de demanda é feita por transformador."};
+  var id=String(tr.id), D=audRefazDemanda(o,id), ctx=D.ctx, tela=demandaTrafo(o,id), corte=audCorte(ctx);
+
+  a.sec("Dados de entrada","Vêm da folha de dados e dos cadastros.");
+  var ent=[["Constante A",num(ctx.constA,4),"Concessionária do município ("+(o.municipio||"—")+")"],
+    ["Constante B",num(ctx.constB,4),"Concessionária do município"],
+    ["kWh/mês do consumidor tipo 1",num(ctx.kwh1),"Anexo 1: "+(o.atividadeT1||"—")+", "+(o.ligacaoT1?nomeLigacao(o.ligacaoT1):"—")]];
+  if(o.atividadeT2) ent.push(["kWh/mês do consumidor tipo 2",num(ctx.kwh2),"Anexo 1: "+o.atividadeT2+", "+(o.ligacaoT2?nomeLigacao(o.ligacaoT2):"—")]);
+  ent.push(["Consumo da luminária tipo 1",num(ctx.potLum1,3)+" kVA",(o.luminaria||"—")+", tabela de luminárias"]);
+  if(o.luminaria2) ent.push(["Consumo da luminária tipo 2",num(ctx.potLum2,3)+" kVA",o.luminaria2+", tabela de luminárias"]);
+  ent.push(["Fator de potência",num(D.fp,2),"Tipo de empreendimento: "+(o.tipoEmpreendimento||"—")]);
+  ent.push(["Corte de casas decimais",corte,"Folha de dados, Parâmetros de cálculo"]);
+  a.passo({t:"Constantes, consumos e parâmetros",tab:{cab:["Valor","Quanto","De onde vem"],num:[1],linhas:ent},
+    alerta:(!ctx.constA||!ctx.constB)?"Sem constantes A e B: confira o município da obra.":
+      (!ctx.kwh1?"Sem consumo do tipo 1 no Anexo 1: confira o tipo de empreendimento e a ligação.":null)});
+
+  a.sec("Consumidores do transformador "+id);
+  var linhasP=D.lista.map(function(p){
+    return [String(p.id)+(p.letra?" ("+String(p.letra).toUpperCase()+")":""),num(Number(p.consT1)||0),num(Number(p.consT2)||0),
+      num(Number(p.lumT1)||0),num(Number(p.lumT2)||0),num(Number(p.cargaEspecial)||0,2)]; });
+  linhasP.push({cel:["Total",num(D.s.c1),num(D.s.c2),num(D.s.l1),num(D.s.l2),num(D.s.esp,2)],marca:true});
+  var pp=a.passo({t:"Pontos alimentados",
+    txt:D.c.raiz?"O circuito começa no ponto "+D.c.raiz+", onde o transformador está, e segue os trechos marcados com o transformador "+id+".":
+      "O transformador ainda não tem ponto de instalação.",
+    tab:{cab:["Ponto","Consum. tipo 1","Consum. tipo 2","Lumin. tipo 1","Lumin. tipo 2","Carga especial (kVA)"],num:[1,2,3,4,5],linhas:linhasP},
+    r:D.lista.length+" ponto"+(D.lista.length===1?"":"s")});
+  a.confere(pp,"Pontos do circuito",D.lista.length,tela.pontos);
+
+  var pnx=a.passo({t:"Número de consumidores do grupo (Nx)",
+    f:"Nx = consumidores tipo 1 + consumidores tipo 2 + pontos com carga especial",
+    v:"Nx = "+D.s.c1+" + "+D.s.c2+" + "+D.s.nEsp+" = "+D.nx, r:num(D.nx),
+    txt:"Cada ponto com carga especial conta como um consumidor no grupo."});
+  a.confere(pnx,"Nx",D.nx,tela.grupo.nx);
+  var pk=a.passo({t:"Consumo do grupo",
+    f:"kWh do grupo = consumidores tipo 1 × kWh do tipo 1 + consumidores tipo 2 × kWh do tipo 2",
+    v:"kWh = "+D.s.c1+" × "+num(ctx.kwh1)+" + "+D.s.c2+" × "+num(ctx.kwh2)+" = "+num(D.kwh),
+    r:num(D.kwh)+" kWh/mês"});
+  a.confere(pk,"kWh do grupo",D.ok?D.kwh:0,tela.grupo.kwhTotal);
+
+  a.sec("Demanda");
+  var pg=a.passo({t:"Demanda do grupo",f:"kVA do grupo = A × (kWh do grupo)^B, cortado em "+corte,
+    v:D.ok?"kVA = "+num(ctx.constA,4)+" × "+num(D.kwh)+"^"+num(ctx.constB,4)+" = "+num(D.bruto,4)+" → "+num(D.grupo,ctx.casas):null,
+    r:num(D.grupo,2)+" kVA",fonte:"Fórmula de demanda da concessionária, com as constantes A e B",
+    alerta:D.ok?null:"Sem consumidores, sem consumo ou sem constantes: a demanda fica zero."});
+  a.confere(pg,"kVA do grupo",D.grupo,tela.grupo.total);
+  var ps=a.passo({t:"Demanda por consumidor (kVA_S)",f:"kVA_S = A × (kWh do grupo)^B ÷ Nx, cortado em "+corte,
+    v:D.ok?"kVA_S = "+num(D.bruto,4)+" ÷ "+D.nx+" = "+num(D.bruto/D.nx,4)+" → "+num(D.kvas,ctx.casas):null,
+    r:num(D.kvas,2)+" kVA",
+    txt:"A divisão usa a demanda do grupo antes do corte. Quanto mais consumidores no mesmo transformador, menor a demanda de cada um."});
+  a.confere(ps,"kVA_S",D.kvas,tela.kvas);
+  var pd=a.passo({t:"Demanda diurna",
+    f:"Diurna = consumidores × kVA_S ÷ fator de potência + cargas especiais, cortado em "+corte,
+    v:"Diurna = "+(D.s.c1+D.s.c2)+" × "+num(D.kvas,ctx.casas)+" ÷ "+num(D.fp,2)+" + "+num(D.s.esp,2)+" = "+
+      num(D.parcCons+D.s.esp,4)+" → "+num(D.diurna,ctx.casas),
+    r:num(D.diurna,2)+" kVA"});
+  a.confere(pd,"Demanda diurna",D.diurna,tela.diurna);
+  var pi=a.passo({t:"Iluminação pública",
+    f:"Iluminação = luminárias tipo 1 × consumo tipo 1 + luminárias tipo 2 × consumo tipo 2",
+    v:"Iluminação = "+D.s.l1+" × "+num(ctx.potLum1,3)+" + "+D.s.l2+" × "+num(ctx.potLum2,3)+" = "+num(D.ilum,3),
+    r:num(D.ilum,3)+" kVA",fonte:"Tabelas normativas, Luminárias"});
+  a.confere(pi,"Iluminação",D.ilum,tela.iluminacao);
+  var pn=a.passo({t:"Demanda noturna",f:"Noturna = diurna + iluminação, cortado em "+corte,
+    v:"Noturna = "+num(D.diurna,ctx.casas)+" + "+num(D.ilum,3)+" = "+num(D.diurna+D.ilum,4)+" → "+num(D.noturna,ctx.casas),
+    r:num(D.noturna,2)+" kVA",txt:"É a maior das duas e a que escolhe e carrega o transformador."});
+  a.confere(pn,"Demanda noturna",D.noturna,tela.noturna);
+
+  a.sec("Transformador");
+  var fc=ctx.fatorCarreg, cat=((S.cat.trafos||{}).items)||[], sug=null;
+  cat.forEach(function(x){ if(sug===null&&D.noturna&&D.noturna<=x.nominal*fc) sug=x.nominal; });
+  var pt=a.passo({t:"Transformador sugerido",
+    f:"O menor transformador cuja potência admissível comporta a demanda noturna. Admissível (KVAT) = nominal × "+num(fc,3),
+    tab:{cab:["Nominal","Admissível (KVAT)","Comporta "+num(D.noturna,2)+" kVA?"],num:[0,1],
+      linhas:cat.map(function(x){ var max=x.nominal*fc;
+        return {cel:[num(x.nominal,1)+" kVA",num(x.nominal,1)+" × "+num(fc,3)+" = "+num(max,2)+" kVA",D.noturna<=max?"sim":"não"],marca:x.nominal===sug}; })},
+    r:sug===null?"nenhum":num(sug,1)+" kVA",
+    fonte:"Tabelas normativas, Transformadores. Fator de carregamento conforme a auditoria da folha de dados.",
+    alerta:!D.noturna?"Sem demanda, não há sugestão.":(sug===null?"A demanda passa do maior transformador da tabela.":null)});
+  var s2=dimensionarTrafo(tela.noturna,o.tipoEmpreendimento,fc);
+  a.confere(pt,"Transformador sugerido",sug,s2?s2.nominal:null);
+
+  if(tr.potencia){
+    var kvat=Number(tr.potencia)*fc, pct=D.noturna?D.noturna/kvat*100:null;
+    var pc=a.passo({t:"Carregamento do transformador de "+num(tr.potencia,1)+" kVA",
+      f:"Carregamento = demanda noturna ÷ (nominal × fator) × 100",
+      v:pct===null?null:"Carregamento = "+num(D.noturna,2)+" ÷ ("+num(tr.potencia,1)+" × "+num(fc,3)+") × 100 = "+
+        num(D.noturna,2)+" ÷ "+num(kvat,2)+" × 100 = "+num(pct,2)+" %",
+      r:pct===null?"—":num(pct,2)+" %",txt:"Acima de 90 % a tela marca em amarelo; acima de 100 %, em vermelho."});
+    var cr=carregamentoTrafo(tela.noturna,tr.potencia,fc);
+    a.confere(pc,"Carregamento",pct,cr?cr.percentual:null);
+  }
+
+  var maxRef=tr.potencia?Number(tr.potencia)*fc:(sug!==null?sug*fc:null);
+  var telaMax=maxConsumidoresT1(o,id,tr.potencia);
+  if(maxRef&&ctx.constA&&ctx.constB&&ctx.kwh1){
+    var livre=maxRef-D.s.esp-D.ilum;
+    var kwhMax=livre>0?Math.pow(livre*D.fp/ctx.constA,1/ctx.constB):0;
+    var mx=livre>0?Math.max(0,Math.floor(kwhMax/ctx.kwh1)):0;
+    var pm=a.passo({t:"Máximo de consumidores tipo 1",
+      f:"Livre = KVAT − cargas especiais − iluminação\nkWh máximo = (livre × fator de potência ÷ A)^(1 ÷ B)\nMáximo = parte inteira de kWh máximo ÷ kWh do tipo 1",
+      v:"Livre = "+num(maxRef,2)+" − "+num(D.s.esp,2)+" − "+num(D.ilum,3)+" = "+num(livre,3)+" kVA\n"+
+        (livre>0?"kWh máximo = ("+num(livre,3)+" × "+num(D.fp,2)+" ÷ "+num(ctx.constA,4)+")^(1 ÷ "+num(ctx.constB,4)+") = "+num(kwhMax,2)+"\n"+
+          "Máximo = "+num(kwhMax,2)+" ÷ "+num(ctx.kwh1)+" = "+num(kwhMax/ctx.kwh1,3)+" → "+mx:"Sem folga: máximo 0"),
+      r:mx+" consumidores (hoje "+(D.s.c1+D.s.c2)+")",
+      txt:"É a fórmula de demanda resolvida ao contrário: quantos consumidores tipo 1 cabem no transformador "+(tr.potencia?"escolhido":"sugerido")+"."});
+    a.confere(pm,"Máximo de consumidores",mx,telaMax);
+  } else a.confere(null,"Máximo de consumidores",null,telaMax);
+
+  a.sec("Carga em cada ponto","Coluna Carga no ponto da grade de pontos.");
+  var pcp=a.passo({t:"Carga de cada ponto",
+    f:"Carga = (consum. tipo 1 + consum. tipo 2) × kVA_S + lumin. tipo 1 × consumo + lumin. tipo 2 × consumo + carga especial",
+    txt:"kVA_S é o do transformador "+id+": "+num(D.kvas,ctx.casas)+" kVA."});
+  var linhasC=D.lista.map(function(p){
+    var v=audCargaPonto(p,ctx,D.kvas);
+    var ok=a.confere(pcp,"Carga do ponto "+p.id,v,cargaDoPonto(p,ctx,tela.kvas));
+    return {cel:[String(p.id),audContaCarga(p,ctx,D.kvas),num(v,3)],dif:!ok};
+  });
+  pcp.tab={cab:["Ponto","Conta","Carga (kVA)"],num:[2],linhas:linhasC};
+  return {seletor:audSeletorTrafo(o,tr)};
+}
+
+/* ---------- queda de tensão ---------- */
+function audRefazQueda(o,D){
+  var ctx=D.ctx, c=D.c, carga={};
+  Object.keys(c.pts).forEach(function(k){ carga[k]=audCargaPonto(c.pts[k],ctx,D.kvas); });
+  function abaixo(k,pilha,lista){
+    if(pilha[k]) return 0;
+    pilha[k]=1; lista.push(k);
+    var s=carga[k]||0;
+    (c.filhos[k]||[]).forEach(function(t){ s+=abaixo(String(t.para),pilha,lista); });
+    delete pilha[k];
+    return s;
+  }
+  var out=[];
+  (function descer(k,acum,pilha,caminho){
+    if(!k||pilha[k]) return;
+    pilha[k]=1;
+    (c.filhos[k]||[]).forEach(function(t){
+      var dest=String(t.para), local=carga[dest]||0, aj=0, lista=[];
+      (c.filhos[dest]||[]).forEach(function(f){ aj+=abaixo(String(f.para),{},lista); });
+      var comp=Number(t.comprimento)||0, bruto=(local/2+aj)*comp/100, mom=Math.trunc(bruto*100)/100;
+      var bitola=t.bitola||ctx.caboSec, coef=coefCabo(bitola,ctx.tensaoNominal,ctx.fatorPotencia);
+      var queda=coef===null?null:cortar(mom*coef,ctx.funcao,ctx.casas);
+      var ac=queda===null?acum:cortar(acum+queda,ctx.funcao,ctx.casas);
+      var V=ctx.tensaoNominal, tensao=V?V-V*ac/100:null;
+      var item={trecho:t,de:k,para:dest,local:local,jus:aj,abaixo:lista,comp:comp,bruto:bruto,momento:mom,
+        bitola:bitola,coef:coef,queda:queda,acumAntes:acum,acum:ac,tensao:tensao,
+        corrente:(tensao&&mom)?mom*1000/tensao/Math.sqrt(3):0,
+        limite:t.classificacao==="IP"?ctx.limiteIP:ctx.limiteSec,amperagem:amperagemCabo(bitola),caminho:caminho};
+      out.push(item);
+      descer(dest,ac,pilha,caminho.concat([item]));
+    });
+    delete pilha[k];
+  })(c.raiz,0,{},[]);
+  return {carga:carga,trechos:out};
+}
+
+function audQueda(a,o,aud){
+  var tr=audTrafoEscolhido(o,aud);
+  if(!tr) return {aviso:"Nenhum transformador lançado. A queda é calculada a partir de cada transformador."};
+  var id=String(tr.id), D=audRefazDemanda(o,id), ctx=D.ctx, Q=audRefazQueda(o,D), tela=calcularCircuito(o,id);
+  var V=ctx.tensaoNominal, corte=audCorte(ctx);
+  var nome=function(k){ return letraPonto(D.c.pts[k],k,k===D.c.raiz); };
+  var desig=function(x){ return nome(x.de)+"-"+nome(x.para); };
+  var idx=Number(aud.sub);
+  if(!(idx>=0&&idx<Q.trechos.length)) idx=0;
+  aud.sub=String(idx);
+  var seletor=audSeletorTrafo(o,tr)+(Q.trechos.length?audSelect("Trecho","sub",Q.trechos.map(function(x,i){
+    return [String(i),desig(x)+" · "+num(x.comp,1)+" m"]; }),idx):"");
+  if(!Q.trechos.length) return {seletor:seletor,aviso:D.c.raiz?"Nenhum trecho sai do ponto "+D.c.raiz+".":
+    "Defina o ponto de instalação do transformador "+id+"."};
+
+  a.sec("Dados de entrada");
+  var pe=a.passo({t:"Parâmetros da rede",tab:{cab:["Valor","Quanto","De onde vem"],num:[1],linhas:[
+    ["Tensão secundária fase-fase",V?num(V,0)+" V":"—","Município da obra"],
+    ["Fator de potência",num(ctx.fatorPotencia,2),"Tipo de empreendimento"],
+    ["Limite de queda na rede secundária",ctx.limiteSec?num(ctx.limiteSec,1)+" %":"—","Folha de dados"],
+    ["Limite de queda na iluminação pública",ctx.limiteIP?num(ctx.limiteIP,1)+" %":"—","Folha de dados"],
+    ["Corte de casas decimais",corte,"Folha de dados"],
+    ["Demanda por consumidor (kVA_S)",num(D.kvas,ctx.casas)+" kVA","A × (kWh)^B ÷ Nx, aberta na auditoria da aba Vãos entre pontos"]]}});
+  a.confere(pe,"kVA_S",D.kvas,demandaTrafo(o,id).kvas);
+
+  var x=Q.trechos[idx], t=tela.trechos[idx]||{}, chave=desig(x)+": ";
+  var pts=x.trecho.classificacao;
+  a.sec("Trecho "+desig(x),"De "+x.de+" para "+x.para+" · "+num(x.comp,1)+" m · "+(NOME_CLASSE[pts]||pts||"—")+
+    " · cabo "+(x.bitola||"sem bitola"));
+  var pc=a.passo({t:"Carga distribuída no trecho (C)",
+    txt:"É a carga do ponto de chegada, "+nome(x.para)+". Entra pela metade no total, por estar distribuída ao longo do trecho.",
+    f:"C = (consum. tipo 1 + consum. tipo 2) × kVA_S + lumin. tipo 1 × consumo + lumin. tipo 2 × consumo + carga especial",
+    v:D.c.pts[x.para]?"C = "+audContaCarga(D.c.pts[x.para],ctx,D.kvas)+" = "+num(x.local,3):null,
+    r:num(x.local,2)+" kVA"});
+  a.confere(pc,chave+"carga distribuída",x.local,t.cargaLocal);
+  var pd=a.passo({t:"Carga acumulada no fim do trecho (D)",
+    txt:x.abaixo.length?"Soma das cargas de todos os pontos depois de "+nome(x.para)+", alimentados por este trecho.":
+      "Nenhum ponto depois de "+nome(x.para)+": fim do circuito.",
+    tab:x.abaixo.length?{cab:["Ponto","Carga (kVA)"],num:[1],linhas:x.abaixo.map(function(k){ return [nome(k),num(Q.carga[k]||0,3)]; })
+      .concat([{cel:["D",num(x.jus,3)],marca:true}])}:null,
+    r:num(x.jus,2)+" kVA"});
+  a.confere(pd,chave+"carga acumulada",x.jus,t.cargaJusante);
+  var pm=a.passo({t:"Total do trecho",
+    f:"Total = (C ÷ 2 + D) × comprimento em centenas de metros, truncado em 2 casas",
+    v:"Total = ("+num(x.local,3)+" ÷ 2 + "+num(x.jus,3)+") × "+num(x.comp/100,4)+" = "+num(x.bruto,4)+" → "+num(x.momento,2),
+    r:num(x.momento,2),txt:"A planilha trunca esse total em duas casas, sem arredondar."});
+  a.confere(pm,chave+"total do trecho",x.momento,t.momento);
+  var faixa=Number(V)>275?"380 V":"220 V", colFp=Number(ctx.fatorPotencia)===1?"fator de potência 1":"fator de potência 0,92";
+  var pq=a.passo({t:"Queda unitária do cabo",
+    txt:"Coeficiente da GED 3667, Tabela 4.1. A coluna sai da tensão da rede (acima de 275 V usa a de 380 V) e do fator de potência.",
+    tab:{cab:["Cabo","Coluna","Queda unitária"],num:[2],linhas:[[x.bitola||"sem bitola",faixa+" · "+colFp,x.coef===null?"sem valor":num(x.coef,4)]]},
+    r:x.coef===null?"sem coeficiente":num(x.coef,4),
+    fonte:"Tabelas normativas, Cabos — queda de tensão"+(x.trecho.bitola?"":". O trecho não tem bitola: vale o cabo padrão da folha"),
+    alerta:x.coef===null?"O cabo não tem coeficiente nessa coluna: a queda do trecho fica em branco.":null});
+  a.confere(pq,chave+"queda unitária",x.coef,t.coef);
+  var pq2=a.passo({t:"Queda no trecho",f:"Queda = total do trecho × queda unitária, cortado em "+corte,
+    v:x.queda===null?null:"Queda = "+num(x.momento,2)+" × "+num(x.coef,4)+" = "+num(x.momento*x.coef,6)+" → "+num(x.queda,ctx.casas)+" %",
+    r:x.queda===null?"—":num(x.queda,ctx.casas)+" %"});
+  a.confere(pq2,chave+"queda no trecho",x.queda,t.queda);
+  var cam=x.caminho.concat([x]);
+  var pa=a.passo({t:"Queda acumulada até "+nome(x.para),
+    f:"Acumulada = acumulada até o início do trecho + queda do trecho, cortado em "+corte,
+    v:"Acumulada = "+num(x.acumAntes,ctx.casas)+" + "+(x.queda===null?"0":num(x.queda,ctx.casas))+" = "+num(x.acum,ctx.casas)+" %",
+    txt:"Caminho do transformador até o fim deste trecho:",
+    tab:{cab:["Trecho","Queda no trecho (%)","Acumulada (%)"],num:[1,2],linhas:cam.map(function(y){
+      return {cel:[desig(y),y.queda===null?"—":num(y.queda,ctx.casas),num(y.acum,ctx.casas)],marca:y===x}; })},
+    r:num(x.acum,ctx.casas)+" %"});
+  a.confere(pa,chave+"queda acumulada",x.acum,t.quedaAcumulada);
+  var pv=a.passo({t:"Tensão no fim do trecho",f:"Tensão = tensão nominal − tensão nominal × acumulada ÷ 100",
+    v:V?"Tensão = "+num(V,0)+" − "+num(V,0)+" × "+num(x.acum,ctx.casas)+" ÷ 100 = "+num(x.tensao,2)+" V":null,
+    r:x.tensao?num(x.tensao,1)+" V":"—"});
+  a.confere(pv,chave+"tensão",x.tensao,t.tensao);
+  var pi=a.passo({t:"Corrente no trecho",f:"Corrente = total do trecho × 1000 ÷ tensão ÷ √3",
+    v:(x.tensao&&x.momento)?"Corrente = "+num(x.momento,2)+" × 1000 ÷ "+num(x.tensao,2)+" ÷ "+num(Math.sqrt(3),4)+" = "+num(x.corrente,2)+" A":null,
+    r:num(x.corrente,1)+" A"});
+  a.confere(pi,chave+"corrente",x.corrente,t.corrente);
+  var acima=x.queda!==null&&x.limite>0&&x.acum>x.limite, acimaI=!!(x.amperagem&&x.corrente>x.amperagem);
+  var pver=a.passo({t:"Verificação",
+    tab:{cab:["Conferência","Valor","Limite","Situação"],num:[1],linhas:[
+      ["Queda acumulada",num(x.acum,ctx.casas)+" %",x.limite?num(x.limite,1)+" % ("+(pts==="IP"?"iluminação pública":"rede secundária")+")":"sem limite",
+        acima?"acima do limite":"dentro do limite"],
+      ["Corrente",num(x.corrente,1)+" A",x.amperagem?num(x.amperagem)+" A, amperagem do cabo":"sem amperagem cadastrada",
+        acimaI?"acima da amperagem":"dentro"]]},
+    fonte:"Limites da folha de dados; amperagem da tabela Cabos — queda de tensão"});
+  a.confere(pver,chave+"queda acima do limite",acima,!!t.excedeQueda);
+  a.confere(pver,chave+"corrente acima da amperagem",acimaI,!!t.excedeCorrente);
+
+  a.sec("Todos os trechos do transformador "+id,"Cada trecho refeito do mesmo jeito e comparado com a tabela da tela.");
+  var ptab=a.passo({t:"Resumo dos trechos"});
+  ptab.tab={cab:["Trecho","C (kVA)","D (kVA)","Total","Queda (%)","Acumulada (%)","Tensão (V)","Corrente (A)","Confere"],num:[1,2,3,4,5,6,7],
+    linhas:Q.trechos.map(function(y,i){
+      var z=tela.trechos[i]||{}, k=desig(y)+": ";
+      var ok=[a.confere(ptab,"Ordem dos trechos, "+(i+1)+"º",desig(y),z.designacao),
+        a.confere(ptab,k+"carga distribuída",y.local,z.cargaLocal),a.confere(ptab,k+"carga acumulada",y.jus,z.cargaJusante),
+        a.confere(ptab,k+"total do trecho",y.momento,z.momento),a.confere(ptab,k+"queda no trecho",y.queda,z.queda),
+        a.confere(ptab,k+"queda acumulada",y.acum,z.quedaAcumulada),a.confere(ptab,k+"tensão",y.tensao,z.tensao),
+        a.confere(ptab,k+"corrente",y.corrente,z.corrente)].every(Boolean);
+      return {cel:[desig(y),num(y.local,2),num(y.jus,2),num(y.momento,2),y.queda===null?"—":num(y.queda,ctx.casas),
+        num(y.acum,ctx.casas),y.tensao?num(y.tensao,1):"—",num(y.corrente,1),ok?"sim":"não"],marca:i===idx,dif:!ok};
+    })};
+  a.confere(ptab,"Quantidade de trechos",Q.trechos.length,tela.trechos.length);
+
+  a.sec("Transformador "+id,"Rodapé do relatório.");
+  var corr=(V&&D.noturna)?D.noturna*1000/(Math.sqrt(3)*V):null;
+  var pct=a.passo({t:"Corrente do transformador",f:"Corrente = demanda noturna × 1000 ÷ (√3 × tensão)",
+    v:corr===null?null:"Corrente = "+num(D.noturna,2)+" × 1000 ÷ ("+num(Math.sqrt(3),4)+" × "+num(V,0)+") = "+num(corr,4)+" A",
+    r:corr===null?"—":num(corr,4)+" A"});
+  a.confere(pct,"Corrente do transformador",corr,correnteTrafo(demandaTrafo(o,id).noturna,V));
+  return {seletor:seletor};
+}
+
+/* ---------- esforço mecânico ---------- */
+function audEsforco(a,o,aud){
+  var calc=calcularEsforcos(o), ctx=calc.ctx;
+  if(!calc.postes.length) return {aviso:"Nenhum poste com vãos. O esforço sai dos trechos da aba Vãos entre pontos."};
+  var id=String(aud.alvo);
+  if(!calc.postes.some(function(x){ return x.id===id; })) id=calc.postes[0].id;
+  aud.alvo=id;
+  var r=calc.postes.filter(function(x){ return x.id===id; })[0], p=r.ponto;
+  var seletor=audSelect("Poste","alvo",calc.postes.map(function(x){
+    return [x.id,"Poste "+x.id+(x.ponto.letra?" ("+String(x.ponto.letra).toUpperCase()+")":"")+(x.nome?" · "+x.nome:"")]; }),id);
+  var trac=function(tag){ return tag?tracaoCabo(tag,ctx.uf,ctx.kv,ctx.vao):null; };
+
+  a.sec("Dados de entrada");
+  a.passo({t:"Parâmetros da obra",tab:{cab:["Valor","Quanto","De onde vem"],linhas:[
+    ["UF",ctx.uf||"—","Município da obra"],["Classe de tensão",ctx.kv?ctx.kv+" kV":"—","Município da obra"],
+    ["Vão básico",ctx.vao?ctx.vao+" m":"—","Folha de dados"],
+    ["Cabo primário",ctx.caboPrim||"—",o.caboPrimarioMec?"Escolhido na aba Esforço mecânico":
+      (tagPrimarioDaFolha(o.caboPrimario)?"Cabo primário da folha de dados":"Sem cabo primário da GED 3648")],
+    ["Altura do poste com primário",fmtAltura(ctx.alturaPrim)+" m",o.alturaPostePrim?"Escolhida na aba":"Padrão da tabela de postes"],
+    ["Altura do poste só com secundário",fmtAltura(ctx.alturaSec)+" m",o.alturaPosteSec?"Escolhida na aba":"Padrão da tabela de postes"],
+    ["Final da tag do cabo secundário",ctx.sufixoSec,"Aba Esforço mecânico"]]}});
+
+  // Vãos na ordem da planilha: primários primeiro, mergulho de fora, no máximo quatro.
+  var prim=[], sec=[];
+  (o.trechos||[]).forEach(function(t,i){
+    if(!t.de||!t.para) return;
+    if(String(t.de)!==id&&String(t.para)!==id) return;
+    if(t.classificacao==="M") return;
+    (t.classificacao==="P"?prim:sec).push(i);
+  });
+  var ordem=prim.concat(sec).slice(0,4);
+  var vaos=ordem.map(function(i){
+    var t=o.trechos[i], bit=t.bitola||(o.caboSecundario||null);
+    return {t:t,i:i,outro:String(t.de)===id?String(t.para):String(t.de),neutro:t.classificacao==="N",
+      tagP:t.classificacao==="P"?(ctx.caboPrim||null):null,bitola:bit,tagS:t.classificacao==="N"?null:tagSecundario(bit)};
+  });
+  var pv=a.passo({t:"Vãos que chegam ao poste",
+    txt:"Os vãos com primário entram primeiro, depois os só secundários, na ordem da grade de trechos, como a planilha preenche. Mergulho não puxa o poste. No máximo quatro.",
+    tab:{cab:["Vão","Trecho","Classificação","Primário","Secundário (bitola → tag)"],linhas:vaos.map(function(v,i){
+      return [String(i+1),rotuloVao(o,id,v),NOME_CLASSE[v.t.classificacao]||v.t.classificacao||"—",v.tagP||"—",
+        v.neutro?"neutro":(v.bitola?v.bitola+" → "+(v.tagS||"sem tag"):"—")]; })},
+    fonte:"Tag do multiplexado pela bitola: tabela Tração de cabos — GED 3648",
+    alerta:prim.length+sec.length>4?"Mais de quatro vãos: a conta considera só os quatro primeiros.":null});
+  a.confere(pv,"Ordem dos vãos",ordem.join(","),r.vaos.map(function(v){ return v.indice; }).join(","));
+
+  var nPrim=vaos.filter(function(v){ return v.t.classificacao==="P"; }).length;
+  var angs=[p.ang12,p.ang23,p.ang34].map(function(x){ return audVazio(x)?null:Number(x); });
+  if(vaos.length===2&&angs[0]===null) angs[0]=180;
+  var falta=(vaos.length>=2&&angs[0]===null)||(vaos.length>=3&&angs[1]===null)||(vaos.length>=4&&angs[2]===null);
+  a.passo({t:"Ângulos entre vãos",
+    txt:vaos.length===1?"Um vão só: fim de linha, sem ângulo.":"Digitados na grade de postes. 180° é linha reta; com dois vãos e nada digitado vale 180°.",
+    tab:vaos.length>1?{cab:["Entre","Ângulo"],num:[1],linhas:[["Vão 1 e vão 2",audAng(angs[0])],["Vão 2 e vão 3",audAng(angs[1])],
+      ["Vão 3 e vão 4",audAng(angs[2])]].slice(0,vaos.length-1)}:null,
+    alerta:falta?"Falta ângulo. Sem ele a planilha pede o valor e não escolhe poste: a resultante fica em branco.":null});
+
+  a.sec("Estrutura primária e altura");
+  var compacto=nPrim>0&&!!ctx.caboPrim&&ehTagCompacta(ctx.caboPrim);
+  var compactoKv=nPrim>0&&!!ctx.caboPrim&&ehCaboCompacto(ctx.caboPrim,ctx.kv);
+  var trafo=null; (o.trafos||[]).forEach(function(t){ if(String(t.ponto)===id) trafo=t; });
+  var equip=trafo&&trafo.potencia?String(trafo.potencia):null;
+  var faixa=null, contaFaixa="";
+  if(nPrim===1){ faixa="FL"; contaFaixa="Um vão primário: fim de linha (FL)."; }
+  else if(nPrim>=3){ faixa="0"; contaFaixa="Três ou mais vãos primários: a planilha sempre cai na faixa 0."; }
+  else if(nPrim===2&&angs[0]!==null){
+    var dv=Math.abs(angs[0]-180);
+    faixa=dv===0?"0":dv<=6?"6":dv<=30?"30":dv<=60?"60":dv<=135?"135":null;
+    contaFaixa="Deflexão = |"+num(angs[0])+" − 180| = "+num(dv)+"° → "+(faixa?"faixa "+faixa:"fora das faixas");
+  }
+  var est=compacto&&faixa?estruturaCompacta(nPrim,faixa,equip):null;
+  var pep;
+  if(!nPrim) pep=a.passo({t:"Estrutura primária",txt:"Poste sem vão primário: não tem estrutura primária."});
+  else if(!compacto) pep=a.passo({t:"Estrutura primária",
+    txt:"O cabo "+(ctx.caboPrim||"primário")+" não é de rede compacta: a estrutura primária não sai da tabela da rede compacta."});
+  else pep=a.passo({t:"Estrutura primária da rede compacta",
+    f:"Faixa de deflexão pelo número de vãos primários e pelo ângulo do vão 1 com o vão 2",
+    v:contaFaixa,
+    tab:est?{cab:["Equipamento","Vãos primários","Faixa","Estrutura","Altura","Capacidade mínima"],num:[4,5],
+      linhas:[[equip?equip+" kVA":"nenhum",String(nPrim),faixa,est.estrutura.CPFL,fmtAltura(est.altura)+" m",est.capacidadeMin+" daN"]]}:null,
+    r:est?est.estrutura.CPFL:"sem estrutura",fonte:"Tabelas normativas, Estruturas da rede compacta; planilha, aba ESFORÇO MECÂNICO, coluna DU",
+    alerta:est?null:"Nenhuma linha da tabela para essa combinação."});
+  a.confere(pep,"Estrutura primária",est?est.estrutura.CPFL:null,r.estruturaPrim);
+
+  var altAuto, regraAlt;
+  if(nPrim===0){ altAuto=ctx.alturaSec; regraAlt="Poste só com secundário: altura do poste de secundário, "+fmtAltura(ctx.alturaSec)+" m."; }
+  else if(ctx.alturaPrim===12){ altAuto=12; regraAlt="Altura do poste com primário escolhida em 12 m."; }
+  else if(!compactoKv){ altAuto=11; regraAlt="Primário fora da rede compacta nesta classe de tensão: 11 m."; }
+  else { altAuto=est?Number(est.altura):11;
+    regraAlt=est?"Rede compacta: a altura da estrutura "+est.estrutura.CPFL+", "+fmtAltura(est.altura)+" m.":"Rede compacta sem estrutura na tabela: 11 m."; }
+  var alt=Number(p.alturaPoste)||altAuto;
+  var pa=a.passo({t:"Altura do poste",
+    txt:p.alturaPoste?"Escolhida na grade de postes: "+fmtAltura(alt)+" m. Pela regra seria "+fmtAltura(altAuto)+" m.":regraAlt,
+    r:fmtAltura(alt)+" m",fonte:"Planilha, aba ESFORÇO MECÂNICO, coluna T"});
+  a.confere(pa,"Altura do poste",alt,r.altura);
+
+  a.sec("Forças","Cada cabo puxa o topo com a sua tração, reduzida pela altura em que está preso.");
+  var geo=geometriaPoste(alt);
+  if(!geo){
+    a.passo({t:"Geometria do poste",alerta:"A tabela de postes não tem a altura de "+fmtAltura(alt)+" m: sem geometria não há conta de força."});
+    a.confere(null,"Resultante",null,r.R);
+    return {seletor:seletor};
+  }
+  var temEstai=p.estai==="ECP"||p.estai==="EPP";
+  var caboEstai=temEstai?(p.caboEstai||ctx.caboPrim):null;
+  var tE=caboEstai?trac(caboEstai):null;
+  var desc=(alt===9&&temEstai&&caboEstai&&tE!==null)?0.2:0;
+  var L=geo.livre, hP=geo.primario||0, hS=geo.secundario-desc;
+  a.passo({t:"Geometria do poste de "+fmtAltura(alt)+" m",tab:{cab:["Medida","Metros"],num:[1],linhas:[
+    ["Engastamento",num(geo.engastamento,2)],["Altura livre (L)",num(L,2)],
+    ["Altura do primário (hp)",geo.primario?num(hP,2):"sem primário"],
+    ["Altura do secundário (hs)",num(hS,2)+(desc?" ("+num(geo.secundario,2)+" − 0,20 pelo estai em poste de 9 m)":"")],
+    ["Altura do estai (he)",num(geo.estai,2)]]},
+    fonte:"Tabelas normativas, Postes — geometria"});
+  var linhasT=[];
+  vaos.forEach(function(v,i){
+    if(v.tagP) linhasT.push(["Vão "+(i+1),"Primário",v.tagP,trac(v.tagP)===null?"sem valor":num(trac(v.tagP))]);
+    if(v.tagS) linhasT.push(["Vão "+(i+1),"Secundário",v.tagS,trac(v.tagS)===null?"sem valor":num(trac(v.tagS))]);
+  });
+  if(caboEstai) linhasT.push(["Vão 1","Estai "+p.estai,caboEstai,tE===null?"sem valor":num(tE)]);
+  a.passo({t:"Tração de projeto dos cabos",
+    txt:"Pela tabela da GED 3648 com UF "+(ctx.uf||"—")+", "+(ctx.kv||"—")+" kV e vão básico de "+(ctx.vao||"—")+" m.",
+    tab:{cab:["Vão","Cabo","Tag","Tração (kgf)"],num:[3],linhas:linhasT},
+    fonte:"Tabelas normativas, Tração de cabos — GED 3648",
+    alerta:linhasT.some(function(l){ return l[3]==="sem valor"; })?"Cabo sem tração na tabela: a parcela dele fica zero.":null});
+
+  var esp=p.calcEspecifico==="Sim", F=[0,0,0,0], contas=[];
+  vaos.forEach(function(v,i){
+    var tP=v.tagP?trac(v.tagP):null, tS=v.tagS?trac(v.tagS):null;
+    var parc=[], soma=0;
+    if(tP!==null){ soma+=hP/L*tP; parc.push(num(hP,2)+" ÷ "+num(L,2)+" × "+num(tP)); }
+    if(tS!==null){ soma+=hS/L*tS; parc.push(num(hS,2)+" ÷ "+num(L,2)+" × "+num(tS)); }
+    if(i===0&&temEstai&&caboEstai&&tE!==null){ soma+=geo.estai/L*tE; parc.push(num(geo.estai,2)+" ÷ "+num(L,2)+" × "+num(tE)); }
+    var fat=(esp&&ctx.vao)?(Number(v.t.comprimento)||0)/ctx.vao:1;
+    F[i]=soma*fat;
+    var exp=parc.length?parc.join(" + "):"0";
+    if(fat!==1) exp="("+exp+") × "+num(Number(v.t.comprimento)||0)+" ÷ "+num(ctx.vao);
+    contas.push("F"+(i+1)+" = "+exp+" = "+num(F[i],2)+" kgf");
+  });
+  var pf=a.passo({t:"Força de cada vão no topo",
+    f:"F = hp ÷ L × tração do primário + hs ÷ L × tração do secundário"+(temEstai?" (+ he ÷ L × tração do estai, no vão 1)":"")+
+      (esp?"\nVão real: F × comprimento do trecho ÷ vão básico":""),
+    v:contas.join("\n"),fonte:"Planilha, aba ESFORÇO MECÂNICO"+(temEstai?"; estai na coluna CU":"")});
+  F.forEach(function(f,i){ a.confere(pf,"F"+(i+1),f,r.F[i]); });
+
+  a.sec("Resultante","As forças dos vãos são somadas duas a duas pelo ângulo entre elas.");
+  var res=null;
+  if(falta){
+    a.passo({t:"Composição das forças",alerta:"Falta ângulo entre vãos: a resultante não é calculada."});
+  } else {
+    var F1=F[0],F2=F[1],F3=F[2],F4=F[3];
+    var rad=function(g){ return g*Math.PI/180; };
+    var temR=angs[1]!==null, temS=angs[2]!==null;
+    var acos=function(x){ return {lim:Math.max(-1,Math.min(1,x)),fora:x>1||x<-1}; };
+    var alfa=Number(angs[0])||0;
+    var R1=F2===0?0:Math.sqrt(F1*F1+F2*F2+2*F1*F2*Math.cos(rad(alfa)));
+    var beta=0, bArg=null;
+    if(temR&&F1!==0&&F2!==0&&R1>0){ bArg=acos((R1*R1+F2*F2-F1*F1)/(2*R1*F2)); beta=angs[1]+Math.acos(bArg.lim)*180/Math.PI; }
+    var R2=(F3===0||!temR)?0:Math.sqrt(R1*R1+F3*F3+2*R1*F3*Math.cos(rad(beta)));
+    var gama=0, gArg=null;
+    if(temS&&F3!==0&&R2>0){ gArg=acos((R2*R2+F3*F3-R1*R1)/(2*F3*R2)); gama=angs[2]+Math.acos(gArg.lim)*180/Math.PI; }
+    var R3=(F4===0||!temS)?0:Math.sqrt(R2*R2+F4*F4+2*R2*F4*Math.cos(rad(gama)));
+    var n2=function(v){ return num(v,2); };
+    if(F2!==0){
+      var p1=a.passo({t:"R1, vãos 1 e 2",f:"R1 = √(F1² + F2² + 2 × F1 × F2 × cos α)",
+        v:"R1 = √("+n2(F1)+"² + "+n2(F2)+"² + 2 × "+n2(F1)+" × "+n2(F2)+" × cos "+num(alfa)+"°) = "+n2(R1)+" kgf",r:n2(R1)+" kgf"});
+      a.confere(p1,"R1",R1,r.res.R1);
+    }
+    if(F3!==0&&temR){
+      var pb=a.passo({t:"Ângulo β, entre R1 e o vão 3",f:"β = ângulo vão 2–3 + arccos((R1² + F2² − F1²) ÷ (2 × R1 × F2))",
+        v:bArg?"β = "+num(angs[1])+" + arccos(("+n2(R1)+"² + "+n2(F2)+"² − "+n2(F1)+"²) ÷ (2 × "+n2(R1)+" × "+n2(F2)+")) = "+
+          num(angs[1])+" + arccos("+num(bArg.lim,4)+") = "+num(beta,2)+"°":"β = 0",
+        r:num(beta,2)+"°",alerta:bArg&&bArg.fora?"O valor dentro do arccos saiu do intervalo de −1 a 1 por arredondamento e foi limitado a ele.":null});
+      a.confere(pb,"β",beta,r.res.beta);
+      var p2=a.passo({t:"R2, com o vão 3",f:"R2 = √(R1² + F3² + 2 × R1 × F3 × cos β)",
+        v:"R2 = √("+n2(R1)+"² + "+n2(F3)+"² + 2 × "+n2(R1)+" × "+n2(F3)+" × cos "+num(beta,2)+"°) = "+n2(R2)+" kgf",r:n2(R2)+" kgf"});
+      a.confere(p2,"R2",R2,r.res.R2);
+    }
+    if(F4!==0&&temS){
+      var pg=a.passo({t:"Ângulo γ, entre R2 e o vão 4",f:"γ = ângulo vão 3–4 + arccos((R2² + F3² − R1²) ÷ (2 × F3 × R2))",
+        v:gArg?"γ = "+num(angs[2])+" + arccos(("+n2(R2)+"² + "+n2(F3)+"² − "+n2(R1)+"²) ÷ (2 × "+n2(F3)+" × "+n2(R2)+")) = "+
+          num(angs[2])+" + arccos("+num(gArg.lim,4)+") = "+num(gama,2)+"°":"γ = 0",
+        r:num(gama,2)+"°",alerta:gArg&&gArg.fora?"O valor dentro do arccos saiu do intervalo de −1 a 1 por arredondamento e foi limitado a ele.":null});
+      a.confere(pg,"γ",gama,r.res.gama);
+      var p3=a.passo({t:"R3, com o vão 4",f:"R3 = √(R2² + F4² + 2 × R2 × F4 × cos γ)",
+        v:"R3 = √("+n2(R2)+"² + "+n2(F4)+"² + 2 × "+n2(R2)+" × "+n2(F4)+" × cos "+num(gama,2)+"°) = "+n2(R3)+" kgf",r:n2(R3)+" kgf"});
+      a.confere(p3,"R3",R3,r.res.R3);
+    }
+    if(F1!==0&&F2===0&&F3===0&&F4===0) res={R:F1,de:"F1, vão único"};
+    else if(F1!==0&&F2!==0&&F3===0&&F4===0) res={R:R1,de:"R1"};
+    else if(F1!==0&&F2!==0&&F3!==0&&F4===0) res={R:R2,de:"R2"};
+    else if(F1!==0&&F2!==0&&F3!==0&&F4!==0) res={R:R3,de:"R3"};
+    else if(F1===0&&F2===0&&F3===0&&F4===0) res={R:0,de:"nenhuma força"};
+  }
+  var R=res?res.R:null;
+  var pr=a.passo({t:"Força resultante",txt:"É a do último vão que existe: F1 com um vão, R1 com dois, R2 com três, R3 com quatro.",
+    r:R===null?"—":num(R,1)+" kgf ("+res.de+")",fonte:"Planilha, aba ESFORÇO MECÂNICO, coluna U",
+    alerta:!falta&&R===null?"Há vão sem força no meio dos outros: a planilha não tem resultante para essa combinação.":null});
+  a.confere(pr,"Resultante",R,r.R);
+
+  a.sec("Escolha do poste");
+  var caps=capacidadesPoste(), calcN=null;
+  caps.forEach(function(c){ if(calcN===null&&R!==null&&R<=c.util+1e-9) calcN=c.nominal; });
+  var pcap=a.passo({t:"Capacidade calculada",
+    f:"A menor capacidade nominal cuja capacidade útil comporta a resultante. Útil = nominal × tolerância",
+    tab:{cab:["Nominal (daN)","Útil (kgf)","Comporta "+(R===null?"—":num(R,1))+" kgf?"],num:[0,1],linhas:caps.map(function(c){
+      return {cel:[String(c.nominal),num(c.nominal)+" × "+num(c.tolerancia,2)+" = "+num(c.util,0),R!==null&&R<=c.util+1e-9?"sim":"não"],marca:c.nominal===calcN}; })},
+    r:calcN===null?"nenhuma":calcN+" daN",fonte:"Tabelas normativas, Postes — capacidade útil",
+    alerta:R!==null&&calcN===null?"A resultante passa do maior poste da tabela.":null});
+  a.confere(pcap,"Capacidade calculada",calcN,r.calc?r.calc.nominal:null);
+
+  var c200=null, c400=null; caps.forEach(function(c){ if(c.nominal===200) c200=c; if(c.nominal===400) c400=c; });
+  var sec1=vaos[0]&&vaos[0].tagS, sec2=vaos[1]&&vaos[1].tagS, sec3=vaos[2]&&vaos[2].tagS;
+  var doisSec=!!(sec1&&sec2&&!sec3), desvio=angs[0]===null?null:Math.abs(angs[0]-180), semAng23=angs[1]===null;
+  var tem120=vaos.some(function(v){ return v.tagS&&String(v.tagS).slice(0,2)==="12"; });
+  var ambos120=doisSec&&/^12[01]$/.test(String(sec1))&&/^12[01]$/.test(String(sec2));
+  var minEst=est?Number(est.capacidadeMin):null;
+  var u200=c200?num(c200.util,0):"—", u400=c400?num(c400.util,0):"—";
+  var conds=[
+    {txt:"Dois vãos secundários de 120 mm², poste de 9 m, deflexão até "+ctx.angMax9+"°, sem ângulo 2–3 e resultante até "+u200+" kgf",
+     ok:doisSec&&alt===9&&desvio!==null&&desvio<=ctx.angMax9&&semAng23&&ambos120&&!!c200&&R<=c200.util,poste:200},
+    {txt:"Dois vãos secundários, poste de 9 m, deflexão acima de "+ctx.angMax9+"°, sem ângulo 2–3 e resultante até "+u400+" kgf",
+     ok:doisSec&&alt===9&&desvio!==null&&desvio>ctx.angMax9&&semAng23&&!!c400&&R<=c400.util,poste:400},
+    {txt:"Poste de 12 m com resultante até "+u200+" kgf: mínimo 400",ok:alt===12&&!!c200&&R<=c200.util,poste:400},
+    {txt:"Sem rede compacta, com secundário de 120 mm² e capacidade calculada de 200: mínimo 400",
+     ok:(nPrim===0||!compacto)&&tem120&&calcN===200,poste:400},
+    {txt:"Primário fora da rede compacta: a capacidade calculada",ok:nPrim>0&&!compacto,poste:calcN},
+    {txt:"Poste de 9 m ou só com secundário: a capacidade calculada",ok:alt===9||nPrim===0,poste:calcN},
+    {txt:"Rede compacta com mínimo da estrutura ("+(minEst===null?"—":minEst)+" daN) maior ou igual à capacidade calculada: o mínimo",
+     ok:minEst!==null&&minEst>=calcN,poste:minEst},
+    {txt:"Rede compacta com capacidade calculada acima do mínimo da estrutura: a capacidade calculada",ok:minEst!==null,poste:calcN}];
+  var pode=R!==null&&calcN!==null, poste=null, achou=-1;
+  if(pode) conds.some(function(c,i){ if(c.ok){ poste=c.poste; achou=i; return true; } return false; });
+  var pregra=a.passo({t:"Regra do poste",
+    txt:"As condições são testadas nesta ordem e vale a primeira que se cumprir.",
+    tab:{cab:["Ordem","Condição","Cumpre?","Poste (daN)"],num:[3],linhas:conds.map(function(c,i){
+      return {cel:[String(i+1),c.txt,!pode?"—":(achou>=0&&i>achou?"não testada":(c.ok?"sim":"não")),c.poste===null||c.poste===undefined?"—":String(c.poste)],marca:i===achou}; })},
+    r:poste?poste+" daN":"sem poste",fonte:"Planilha, aba ESFORÇO MECÂNICO, coluna V",
+    alerta:!pode?"Sem resultante ou sem capacidade, não há poste.":(poste===null?"Nenhuma condição se cumpre.":null)});
+  a.confere(pregra,"Capacidade do poste",poste,r.poste);
+  var nome=poste?String(alt).replace(".",",")+"/"+(poste/100):null;
+  var pnome=a.passo({t:"Tipo de poste",f:"Altura / capacidade em centenas de daN",
+    v:poste?fmtAltura(alt)+" / ("+poste+" ÷ 100) = "+nome:null,r:nome||"—",
+    alerta:poste&&!posteExiste(alt,poste)?"Não há poste de "+fmtAltura(alt)+" m com "+poste+" daN na tabela de postes disponíveis.":null});
+  a.confere(pnome,"Tipo de poste",nome,r.nome);
+
+  a.sec("Estrutura secundária","Coluna X da planilha.");
+  var tab=S.cat.estruturas_sec||{}, conf=tab.configuracoes||[], ests=tab.estruturas||[];
+  var suf=ctx.sufixoSec||"0";
+  var cel=vaos.map(function(v){ return v.neutro?"N":(v.tagS?String(v.tagS).slice(0,-1)+suf:""); });
+  var nSec=cel.filter(Boolean).length, regra=null, motivo="";
+  if(!vaos.some(function(v){ return !!v.tagS||v.neutro; })) motivo="Nenhum vão com secundário: sem estrutura secundária.";
+  else if(nSec>=4){ regra=trafo?"ITA.ITA":null; motivo=trafo?"Poste de transformador com quatro vãos secundários: ITA.ITA.":
+    "Quatro vãos secundários: a planilha pede a estrutura digitada."; }
+  else if(vaos[0]&&vaos[0].t.classificacao==="P"&&!cel[0]) motivo="O vão 1 tem primário sem secundário: a planilha pede o cabo secundário desse vão.";
+  var chave=(cel[0]||"")+(cel[1]||"")+(cel[2]||""), codigo=null, faixaS=null, linhaCod=null, linhaEst=null;
+  if(!motivo){
+    conf.some(function(c){ if(c.t1+c.t2+c.t3===chave){ codigo=c.codigo; linhaCod=c; return true; } return false; });
+    if(vaos.length===1) faixaS="FL";
+    else if(angs[0]!==null){
+      var ds=Math.abs(angs[0]+(angs[1]===null?0:angs[1])-180);
+      faixaS=ds===0?"0":ds<=45?"45":ds<=90?"90":ds<=240?"90":null;
+    }
+    if(codigo&&faixaS) ests.some(function(e){ if(e.alteracao+e.t1+e.t2+e.t3+e.deflexao===codigo+faixaS){ regra=e.estrutura; linhaEst=e; return true; } return false; });
+  }
+  var contaDef=vaos.length===1?"Um vão: fim de linha (FL).":(angs[0]===null?"Sem ângulo.":
+    "Deflexão = |"+num(angs[0])+" + "+num(angs[1]===null?0:angs[1])+" − 180| = "+num(Math.abs(angs[0]+(angs[1]===null?0:angs[1])-180))+"° → "+(faixaS||"fora das faixas"));
+  var psec=a.passo({t:"Estrutura secundária",
+    txt:motivo||"Os cabos secundários dos vãos 1 a 3, com o final escolhido, formam a chave que dá o código. O código e a faixa de deflexão dão a estrutura.",
+    f:motivo?null:"Chave = tag do vão 1 + tag do vão 2 + tag do vão 3 (N para neutro)\nFaixa = |ângulo 1–2 + ângulo 2–3 − 180|: 0, até 45°, até 90° (até 240° também cai em 90°)",
+    v:motivo?null:"Chave = "+(cel.slice(0,3).map(function(c){ return c||"(vazio)"; }).join(" + "))+" → código "+(codigo||"não encontrado")+"\n"+contaDef,
+    tab:linhaEst?{cab:["Código","Faixa","Estrutura"],linhas:[{cel:[codigo,faixaS,regra],marca:true}]}:null,
+    r:regra||"sem estrutura pela regra",
+    fonte:"Tabelas normativas, Estrutura secundária — códigos e por deflexão",
+    alerta:!motivo&&!linhaCod?"Combinação de cabos fora da tabela de códigos.":(!motivo&&codigo&&faixaS&&!linhaEst?"Código e faixa fora da tabela de estruturas.":null)});
+  if(p.estruturaSecManual){
+    var pman=a.passo({t:"Estrutura secundária usada",txt:"Escolhida na grade de postes, no lugar da regra.",r:String(p.estruturaSecManual)});
+    a.confere(pman,"Estrutura secundária",String(p.estruturaSecManual),r.estruturaSec);
+  } else a.confere(psec,"Estrutura secundária",regra,r.estruturaSec);
+  return {seletor:seletor};
+}
+
+/* ---------- cintas e suporte ---------- */
+function audCintasPoste(o,r){
+  var out={nome:r.nome,topo:null,con:conicidadePadrao(),lum:"",letra:"",ped:[]};
+  if(!r.nome) return out;
+  items("cintas").forEach(function(x){ if(String(x.bitola)===r.nome) out.topo=Number(x.diamTopo); });
+  var p=r.ponto, n2=Number(p.lumT2)||0, n1=Number(p.lumT1)||0;
+  out.lum=n2>0?(n2===1?"":n2+"x")+(o.luminaria2||""):(n1>0?(n1===1?"":n1+"x")+(o.luminaria||""):"");
+  out.letra=out.lum?out.lum.charAt(0):"";
+  var ped=[];
+  if(r.estruturaPrim) ped.push({tipo:"Estrutura primária",estrutura:r.estruturaPrim});
+  if(r.estai) ped.push({tipo:r.estai==="ECP"?"Estai cruzeta a poste":"Estai poste a poste",estrutura:r.estai});
+  if(r.estruturaSec) ped.push({tipo:"Estrutura secundária",estrutura:r.estruturaSec});
+  if(out.lum&&!/[0-9]/.test(out.letra)) ped.push({tipo:"Braço de iluminação pública",estrutura:out.letra,lum:out.lum});
+  ped.forEach(function(q){
+    q.chave=r.nome+q.estrutura;
+    q.lin=linhaCinta(r.nome,q.estrutura);
+    q.cintas=(q.lin&&out.topo!==null)?q.lin.posicoes.map(function(pos){
+      var dia=out.topo+pos*out.con, limpo=Math.round(dia*1e6)/1e6;
+      return {pos:pos,dia:dia,div:(limpo-5)/10,cinta:Math.ceil((limpo-5)/10)*10};
+    }):[];
+  });
+  out.ped=ped;
+  return out;
+}
+function audCintas(a,o,aud){
+  var C=calcularCintas(o);
+  if(!C.postes.length) return {aviso:"Nenhum poste com vãos. As cintas saem do tipo de poste e das estruturas do esforço mecânico."};
+  var id=String(aud.alvo);
+  if(id!=="__total"&&!C.postes.some(function(x){ return x.esforco.id===id; })) id=C.postes[0].esforco.id;
+  aud.alvo=id;
+  var seletor=audSelect("Poste","alvo",C.postes.map(function(x){ var r=x.esforco;
+    return [r.id,"Poste "+r.id+(r.ponto.letra?" ("+String(r.ponto.letra).toUpperCase()+")":"")+(r.nome?" · "+r.nome:"")]; })
+    .concat([["__total","Totais da obra"]]),id);
+
+  if(id==="__total"){
+    a.sec("Totais da obra","Soma das cintas e suportes de todos os postes.");
+    var porD={}, deOnde={}, sup={}, supDe={};
+    C.postes.forEach(function(x){
+      var m=audCintasPoste(o,x.esforco), rid=x.esforco.id;
+      m.ped.forEach(function(q){
+        q.cintas.forEach(function(c){ porD[c.cinta]=(porD[c.cinta]||0)+1; (deOnde[c.cinta]=deOnde[c.cinta]||{})[rid]=((deOnde[c.cinta]||{})[rid]||0)+1; });
+        if(q.lin) Object.keys(q.lin.suportes||{}).forEach(function(d){ var n=Number(q.lin.suportes[d]);
+          sup[d]=(sup[d]||0)+n; (supDe[d]=supDe[d]||{})[rid]=((supDe[d]||{})[rid]||0)+n; });
+      });
+    });
+    var junta=function(m){ return Object.keys(m).map(function(k){ return "poste "+k+": "+m[k]; }).join(", "); };
+    var ds=Object.keys(porD).concat(Object.keys(C.porDiametro)).map(Number)
+      .filter(function(d,i,l){ return l.indexOf(d)===i; }).sort(function(x,y){ return x-y; });
+    var pt=a.passo({t:"Cintas por diâmetro",txt:"Cada cinta de cada poste, contada pelo diâmetro.",
+      tab:{cab:["Cinta (mm)","De onde vem","Quantidade"],num:[0,2],linhas:[]}});
+    pt.tab.linhas=ds.map(function(d){
+      var ok=a.confere(pt,"Cintas de "+d+" mm",porD[d]||0,C.porDiametro[d]||0);
+      return {cel:[String(d),junta(deOnde[d]||{}),String(porD[d]||0)],dif:!ok}; });
+    var tot=ds.reduce(function(s,d){ return s+(porD[d]||0); },0);
+    pt.tab.linhas.push({cel:["Total","",String(tot)],marca:true});
+    pt.r=tot+" cinta"+(tot===1?"":"s");
+    var ss=Object.keys(sup).concat(Object.keys(C.suportes)).map(Number)
+      .filter(function(d,i,l){ return l.indexOf(d)===i; }).sort(function(x,y){ return x-y; });
+    var ps=a.passo({t:"Suporte de transformador",txt:"Vem junto com a estrutura primária dos postes de transformador, pela tabela de cintas.",
+      tab:{cab:["Suporte (mm)","De onde vem","Quantidade"],num:[0,2],linhas:[]},
+      r:ss.length?null:"nenhum suporte",fonte:"Tabelas normativas, Cintas por estrutura"});
+    ps.tab.linhas=ss.map(function(d){
+      var ok=a.confere(ps,"Suportes de "+d+" mm",sup[d]||0,C.suportes[d]||0);
+      return {cel:[String(d),junta(supDe[d]||{}),String(sup[d]||0)],dif:!ok}; });
+    return {seletor:seletor};
+  }
+
+  var x=C.postes.filter(function(y){ return y.esforco.id===id; })[0], r=x.esforco, k=x.cintas;
+  a.sec("Poste "+id+(r.ponto.letra?" ("+String(r.ponto.letra).toUpperCase()+")":""));
+  if(!r.nome){
+    a.passo({t:"Tipo de poste",alerta:"Este poste ainda não tem tipo: resolva o esforço mecânico dele primeiro."});
+    return {seletor:seletor};
+  }
+  var m=audCintasPoste(o,r);
+  a.passo({t:"Tipo de poste e diâmetro do topo",tab:{cab:["Valor","Quanto","De onde vem"],linhas:[
+    ["Tipo de poste",r.nome,"Auditoria do esforço mecânico"],
+    ["Diâmetro no topo",m.topo===null?"sem cadastro":num(m.topo,0)+" mm","Tabelas normativas, Diâmetro de poste e cintas"],
+    ["Conicidade",num(m.con,2)+" mm por mm","Fixa, como a coluna F da tabela de cintas da planilha"]]},
+    alerta:m.topo===null?"O poste "+r.nome+" não tem diâmetro de topo no cadastro de cintas.":null});
+  var pe=a.passo({t:"Estruturas montadas no poste",
+    txt:"Cada estrutura vira uma chave da tabela de cintas: o tipo de poste seguido do nome da estrutura. O braço de iluminação é a primeira letra do modelo da luminária; com mais de uma luminária o modelo começa com o número (2x…) e a planilha não traz braço.",
+    tab:{cab:["Estrutura","Nome","Chave","Na tabela?"],linhas:m.ped.map(function(q){
+      return [q.tipo+(q.lum?" ("+q.lum+")":""),q.estrutura,q.chave,q.lin?"sim":"não"]; })},
+    fonte:"Planilha, aba ESFORÇO MECÂNICO, colunas DN a DR; luminária pela coluna AA",
+    alerta:m.lum&&/[0-9]/.test(m.letra)?"Mais de uma luminária no poste ("+m.lum+"): sem cinta de braço.":null});
+  a.confere(pe,"Chaves do poste",m.ped.filter(function(q){ return !!q.lin; }).map(function(q){ return q.chave; }).join(" · "),
+    k.chaves.map(function(c){ return c.chave; }).join(" · "));
+  var resumo={};
+  m.ped.forEach(function(q){
+    if(!q.lin){ a.passo({t:q.tipo+" "+q.estrutura,alerta:"A chave "+q.chave+" não está na tabela de cintas por estrutura: este item fica sem cinta."}); return; }
+    var eng=null; k.chaves.forEach(function(c){ if(c.chave===q.chave) eng=c; });
+    var pq=a.passo({t:q.tipo+" "+q.estrutura,
+      f:"Ø no ponto = Ø do topo + posição × "+num(m.con,2)+"\nCinta = (Ø − 5) ÷ 10, arredondado para cima, × 10",
+      txt:"A cinta é o menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm.",
+      fonte:"Tabelas normativas, Cintas por estrutura, chave "+q.chave});
+    pq.tab={cab:["Posição do topo (mm)","Ø no poste (mm)","Cinta (mm)"],num:[0],linhas:q.cintas.map(function(c,j){
+      var e=eng&&eng.cintas[j];
+      var ok=a.confere(pq,q.chave+", posição "+c.pos+": Ø",c.dia,e?e.diametro:null)&
+             a.confere(pq,q.chave+", posição "+c.pos+": cinta",c.cinta,e?e.cinta:null);
+      resumo[c.cinta]=(resumo[c.cinta]||0)+1;
+      return {cel:[num(c.pos,0),num(m.topo,0)+" + "+num(c.pos,0)+" × "+num(m.con,2)+" = "+num(c.dia,1),
+        "("+num(c.dia,1)+" − 5) ÷ 10 = "+num(c.div,2)+" → "+(c.cinta/10)+" × 10 = "+c.cinta],dif:!ok};
+    })};
+    a.confere(pq,q.chave+": quantidade de cintas",q.cintas.length,eng?eng.cintas.length:0);
+    pq.r=q.cintas.map(function(c){ return "Ø"+c.cinta; }).join(", ")||"nenhuma cinta";
+    var sp=Object.keys(q.lin.suportes||{});
+    if(sp.length) pq.txt+=" Esta estrutura leva suporte de transformador: "+sp.map(function(d){ return q.lin.suportes[d]+" de Ø"+d+" mm"; }).join(", ")+".";
+  });
+  var chavesR=Object.keys(resumo).map(Number).sort(function(x,y){ return x-y; });
+  if(chavesR.length) a.passo({t:"Cintas deste poste",tab:{cab:["Cinta (mm)","Quantidade"],num:[0,1],
+    linhas:chavesR.map(function(d){ return [String(d),String(resumo[d])]; })}});
+  return {seletor:seletor};
+}
+
+/* ---------- cadastro de diâmetro de poste e cintas ---------- */
+function audCintasCadastro(a,o,aud){
+  var l=items("cintas");
+  if(!l.length) return {aviso:"A tabela de diâmetro de poste e cintas está vazia."};
+  var i=Number(aud.alvo); if(!(i>=0&&i<l.length)) i=0;
+  var d=audVazio(aud.sub)||isNaN(Number(aud.sub))?1000:Number(aud.sub);
+  aud.alvo=String(i); aud.sub=String(d);
+  var r=l[i], con=conicidadePadrao(), topo=Number(r.diamTopo), base=Number(r.diamBase), alt=Number(r.altura);
+  var seletor=audSelect("Bitola","alvo",l.map(function(x,j){ return [String(j),x.bitola]; }),i)+
+    '<div class="fld"><label>Distância do topo (mm)</label><input type="number" data-aud="sub" value="'+esc(d)+'" step="10" min="0"></div>';
+  a.sec("Bitola "+r.bitola);
+  a.passo({t:"Linha do cadastro",tab:{cab:["Campo","Valor"],num:[1],linhas:[["Altura",num(alt,1)+" m"],["Carga",String(r.carga||"—")+" daN"],
+    ["Ø do topo",num(topo,0)+" mm"],["Ø da base",num(base,0)+" mm"]]},fonte:"Tabelas normativas, Diâmetro de poste e cintas"});
+  a.passo({t:"Conicidade",
+    txt:"A planilha aplica "+num(con,2)+" mm por mm em todas as bitolas (coluna F: topo + distância × "+num(con,2)+"), e não a diferença entre base e topo de cada uma. Para esta bitola essa diferença daria "+
+      num((base-topo)/(alt*1000),5)+" mm por mm.",r:num(con,2)+" mm por mm"});
+  var dia=topo+d*con, limpo=Math.round(dia*1e6)/1e6, cinta=Math.ceil((limpo-5)/10)*10;
+  a.sec("Ponto a "+num(d,0)+" mm do topo","Mesma conta da calculadora Conferir um ponto do poste.");
+  var pd=a.passo({t:"Diâmetro no ponto",f:"Ø = Ø do topo + distância × conicidade",
+    v:"Ø = "+num(topo,0)+" + "+num(d,0)+" × "+num(con,2)+" = "+num(dia,1)+" mm",r:num(dia,1)+" mm",
+    alerta:d>alt*1000?"A distância passa do comprimento do poste ("+num(alt*1000,0)+" mm).":null});
+  a.confere(pd,"Ø no ponto",dia,diametroNoPoste(r.bitola,d));
+  var pc=a.passo({t:"Cinta",f:"Cinta = (Ø − 5) ÷ 10, arredondado para cima, × 10",
+    v:"Cinta = ("+num(dia,1)+" − 5) ÷ 10 = "+num((limpo-5)/10,2)+" → "+(cinta/10)+" × 10 = "+cinta+" mm",r:"Ø "+cinta+" mm",
+    txt:"O menor múltiplo de 10 mm que acomoda o diâmetro, com folga de 5 mm: até 5 mm acima da dezena fica na dezena de baixo."});
+  a.confere(pc,"Cinta no ponto",cinta,cintaPara(dia));
+
+  var tela=pontosDe(r), linhasP=[];
+  var pp=a.passo({t:"Pontos de fixação D1 a D10",txt:"Coluna Pontos de fixação da tabela. Cada ponto é conferido com a mesma conta."});
+  (r.distancias||[]).forEach(function(dd,j){
+    if(audVazio(dd)) return;
+    var di=topo+Number(dd)*con, li=Math.round(di*1e6)/1e6, ci=Math.ceil((li-5)/10)*10, e=tela[j]||{};
+    var ok=a.confere(pp,"D"+(j+1)+": cinta",ci,e.cinta)&a.confere(pp,"D"+(j+1)+": Ø",Number(di.toFixed(1)),e.diametro);
+    linhasP.push({cel:["D"+(j+1),num(dd,0),num(topo,0)+" + "+num(dd,0)+" × "+num(con,2)+" = "+num(di,1),String(ci)],dif:!ok});
+  });
+  pp.tab={cab:["Ponto","Distância (mm)","Ø (mm)","Cinta (mm)"],num:[1,3],linhas:linhasP};
+  if(!linhasP.length) pp.r="nenhum ponto definido";
+
+  var faixas=[], atual=null;
+  for(var dd=0; dd<=alt*1000; dd+=10){
+    var di2=topo+dd*con, c2=Math.ceil((Math.round(di2*1e6)/1e6-5)/10)*10;
+    if(!atual||atual.cinta!==c2){ atual={cinta:c2,de:Number(di2.toFixed(1)),ate:Number(di2.toFixed(1))}; faixas.push(atual); }
+    else atual.ate=Number(di2.toFixed(1));
+  }
+  var pf=a.passo({t:"Faixas de cinta da bitola",
+    txt:"Do topo à base, a cada 10 mm, a cinta muda quando o diâmetro passa da dezena mais 5 mm.",
+    tab:{cab:["Cinta (mm)","Ø de (mm)","Ø até (mm)"],num:[0,1,2],linhas:faixas.map(function(f){ return [String(f.cinta),num(f.de,1),num(f.ate,1)]; })}});
+  a.confere(pf,"Faixas da bitola",JSON.stringify(faixas),JSON.stringify(r.faixas||[]));
+  return {seletor:seletor};
+}
+
+var AUD_MONTA={folha:audFolha,topologia:audDemanda,queda:audQueda,esforco:audEsforco,cintasobra:audCintas,cintas:audCintasCadastro};
+
+function viewAuditoria(){
+  var aud=S.aud, o=S.rascunho, a=novaAuditoria(), sel="", aviso=null;
+  try{
+    var monta=AUD_MONTA[aud.aba];
+    if(!monta) aviso="Esta tela não tem conta para auditar.";
+    else if(aud.aba!=="cintas"&&!o) aviso="Obra não encontrada.";
+    else { var res=monta(a,o,aud)||{}; sel=res.seletor||""; aviso=res.aviso||null; }
+  }catch(e){ aviso="Não foi possível montar a auditoria: "+e.message; }
+  var ok=!a.difs.length;
+  var rodape=(!aviso&&a.conferidos)?'<div class="aud-conf '+(ok?"ok":"bad")+'">'+
+    (ok?"✓ Conferência automática: os "+a.conferidos+" valores refeitos nesta auditoria são iguais aos da tela."
+       :"Conferência automática: "+a.difs.length+" de "+a.conferidos+" valores refeitos não batem com a tela. Veja os passos marcados.")+"</div>":"";
+  var obra=(aud.aba!=="cintas"&&o&&o.empreendimento)?o.empreendimento+" · ":"";
+  return '<div class="modal-bg aud-bg" id="audBg"><div class="modal aud" role="dialog" aria-modal="true" aria-labelledby="audTit">'+
+    '<div class="modal-h"><div><h3 id="audTit">Auditoria de cálculo · '+esc(AUD_TITULO[aud.aba]||"")+"</h3>"+
+    '<p class="aud-sub">'+esc(obra)+"Gerada em "+esc(fmtDT(new Date().toISOString()))+"</p></div>"+
+    '<div class="aud-acoes"><button class="btn ghost sm" id="audImprimir">Imprimir</button>'+
+    '<button class="btn ghost sm" id="audFechar">Fechar</button></div></div>'+
+    (sel?'<div class="aud-sel">'+sel+"</div>":"")+
+    '<div class="modal-b">'+(aviso?'<div class="empty" style="padding:28px"><p>'+esc(aviso)+"</p></div>":
+      '<p class="note aud-intro">Cada passo mostra a regra, a regra com os números desta obra, o resultado e a fonte. '+
+      "Os números aparecem arredondados para leitura; a conta usa o valor completo.</p>"+audCorpo(a))+"</div>"+
+    (rodape?'<div class="modal-f">'+rodape+"</div>":"")+"</div></div>";
+}
+
+/* A auditoria fica fora do #app: redesenhar a tela por baixo não a fecha nem
+   a apaga, e ela só é refeita quando muda o que está sendo auditado. */
+function abrirAuditoria(aba,alvo,sub){
+  S.aud={aba:aba,alvo:audVazio(alvo)?null:String(alvo),sub:audVazio(sub)?null:String(sub)};
+  desenharAuditoria();
+}
+function fecharAuditoria(){ S.aud=null; desenharAuditoria(); }
+function desenharAuditoria(){
+  var velho=document.getElementById("audBg");
+  if(!S.aud){ if(velho) velho.remove(); document.body.classList.remove("com-aud"); return; }
+  var novo=el(viewAuditoria());
+  if(velho) velho.parentNode.replaceChild(novo,velho); else document.body.appendChild(novo);
+  document.body.classList.add("com-aud");
+  novo.querySelector("#audFechar").addEventListener("click",fecharAuditoria);
+  novo.querySelector("#audImprimir").addEventListener("click",function(){ window.print(); });
+  var desceuNoFundo=false;
+  novo.addEventListener("mousedown",function(e){ desceuNoFundo=(e.target===novo); });
+  novo.addEventListener("click",function(e){ if(e.target===novo&&desceuNoFundo) fecharAuditoria(); });
+  novo.querySelectorAll("[data-aud]").forEach(function(c){
+    c.addEventListener("change",function(){
+      var k=c.getAttribute("data-aud");
+      S.aud[k]=c.value;
+      if(k==="alvo"&&S.aud.aba==="queda") S.aud.sub=null;
+      desenharAuditoria();
+    });
+  });
+  if(!velho){ var f=novo.querySelector("#audFechar"); if(f) f.focus(); }
 }
 
 /* ==========================================================================
@@ -2144,7 +3348,7 @@ var TAB={
  aprovados:{cat:"fornecedores_aprovados",t:"Fornecedores aprovados",d:"Documentos que definem fabricantes e fornecedores homologados.",
    cols:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]],busca:["numero","descricao"],perm:"norm",
    novo:{tipo:"GED",numero:"",descricao:""},form:[["tipo","Tipo"],["numero","Número"],["descricao","Descrição"]]},
- cintas:{cat:"cintas",t:"Diâmetro de poste e cintas",d:"Parâmetros de cada bitola de poste. A conicidade e as faixas de cinta são recalculadas a cada gravação.",
+ cintas:{cat:"cintas",t:"Diâmetro de poste e cintas",d:"Parâmetros de cada bitola de poste. O diâmetro em cada ponto é o do topo mais a distância do topo × 0,02, como na tabela da planilha; as faixas de cinta são recalculadas a cada gravação.",
    cols:[["bitola","Bitola"],["altura","Altura (m)",function(v){return num(v,1);},1],["carga","Carga (daN)",null,1],
          ["diamTopo","Ø topo (mm)",function(v){return num(v,0);},1],["diamBase","Ø base (mm)",function(v){return num(v,0);},1],
          ["conicidade","Conicidade (mm/mm)",function(v){return num(v,5);},1],
@@ -2253,7 +3457,40 @@ var TAB={
          ["faixa","Deflexão (0, 6, 30, 60, 135 ou FL)"],["altura","Altura do poste (m)","number"],["capacidadeMin","Capacidade mínima (daN)","number"]],
    formExtra:function(b){ return '<div class="fgrid" style="margin-top:10px"><div class="fld c3"><label>Estrutura CPFL</label>'+
      '<input type="text" data-estcpfl value="'+esc((b.estrutura&&b.estrutura.CPFL)||"")+'"></div></div>'; },
-   lerExtra:function(bg,rec){ rec.estrutura=Object.assign({},rec.estrutura||{},{CPFL:bg.querySelector("[data-estcpfl]").value}); }}
+   lerExtra:function(bg,rec){ rec.estrutura=Object.assign({},rec.estrutura||{},{CPFL:bg.querySelector("[data-estcpfl]").value}); }},
+
+ /* ---------- usados nas cintas (entrega 2.3) ---------- */
+ cintas_est:{cat:"cintas_estruturas",t:"Cintas por estrutura",
+   d:"Posições de cinta, medidas do topo, para cada tipo de poste e estrutura montada nele. Estruturas de transformador trazem também o suporte.",
+   cols:[["bitola","Poste",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }],["tipo","Tipo"],
+         ["estrutura","Estrutura",function(v){ return '<span class="mono">'+esc(v)+"</span>"; }],
+         ["posicoes","Posições do topo (mm)",function(v){ return (v||[]).map(function(n){ return '<span class="pill" style="margin-right:3px">'+n+"</span>"; }).join(""); }],
+         ["suportes","Suporte de trafo",function(v){ var k=Object.keys(v||{}); return k.length?k.map(function(d){ return v[d]+"× Ø"+d; }).join(", "):"—"; }]],
+   busca:["bitola","estrutura","tipo"],perm:"norm",novo:{bitola:"",estrutura:"",tipo:"secundária",posicoes:[],suportes:{}},
+   form:[["estrutura","Estrutura"],["bitola","Tipo de poste (ex.: 11/6)"],["tipo","Tipo (primária, secundária, estai ou braço de IP)"]],
+   formExtra:function(b){ var sp=b.suportes||{};
+     return '<div class="fgrid" style="margin-top:10px"><div class="fld c6"><label>Posições das cintas, em mm do topo, separadas por vírgula</label>'+
+       '<input type="text" data-posicoes value="'+esc((b.posicoes||[]).join(", "))+'"></div>'+
+       '<div class="fld c6"><label>Suportes de trafo, como diâmetro:quantidade (ex.: 240:2)</label>'+
+       '<input type="text" data-suportes value="'+esc(Object.keys(sp).map(function(d){ return d+":"+sp[d]; }).join(", "))+'"></div></div>'; },
+   lerExtra:function(bg,rec){
+     rec.posicoes=String(bg.querySelector("[data-posicoes]").value||"").split(/[,;\s]+/).filter(Boolean).map(Number).filter(function(n){ return n>0; });
+     var sp={}; String(bg.querySelector("[data-suportes]").value||"").split(/[,;\s]+/).filter(Boolean).forEach(function(x){
+       var m=x.split(":"); if(m.length===2&&Number(m[1])>0) sp[String(Number(m[0]))]=Number(m[1]); });
+     rec.suportes=sp; }},
+ est_sec_cod:{cat:"estruturas_sec",campo:"configuracoes",t:"Estrutura secundária — códigos",
+   d:"Primeira etapa da estrutura secundária: os cabos secundários dos vãos 1 a 3 viram um código. I são bitolas iguais, D diferentes, N vão de neutro; o dígito é o final da tag do cabo.",
+   cols:[["t1","Vão 1",function(v){ return v?'<span class="mono">'+esc(v)+"</span>":"—"; }],["t2","Vão 2",function(v){ return v?'<span class="mono">'+esc(v)+"</span>":"—"; }],
+         ["t3","Vão 3",function(v){ return v?'<span class="mono">'+esc(v)+"</span>":"—"; }],["codigo","Código",function(v){ return '<span class="mono"><strong>'+esc(v)+"</strong></span>"; }]],
+   busca:["t1","t2","t3","codigo"],perm:"norm",novo:{t1:"",t2:"",t3:"",t4:"",codigo:""},
+   form:[["codigo","Código"],["t1","Cabo do vão 1"],["t2","Cabo do vão 2"],["t3","Cabo do vão 3"]]},
+ est_sec_tab:{cat:"estruturas_sec",campo:"estruturas",t:"Estrutura secundária — por deflexão",
+   d:"Segunda etapa: o código dos cabos e a faixa de deflexão (|ângulo 1–2 + ângulo 2–3 − 180|) dão a estrutura secundária.",
+   cols:[["t1","Código",function(v,r){ return '<span class="mono">'+esc((r.alteracao?r.alteracao+" · ":"")+r.t1+r.t2+r.t3)+"</span>"; }],
+         ["deflexao","Deflexão",function(v){ return v==="FL"?"fim de linha":(v==="INT"?"intermediária":"até "+esc(v)+"°"); }],
+         ["estrutura","Estrutura",function(v){ return '<span class="mono"><strong>'+esc(v)+"</strong></span>"; }]],
+   busca:["t1","t2","t3","estrutura","deflexao"],perm:"norm",novo:{alteracao:"",t1:"",t2:"",t3:"",estrutura:"",deflexao:"0"},
+   form:[["estrutura","Estrutura"],["t1","Código do vão 1"],["t2","Código do vão 2"],["t3","Código do vão 3"],["deflexao","Deflexão (FL, 0, 45 ou 90)"]]}
 };
 
 function barraRevisao(chave){
@@ -2337,7 +3574,8 @@ function viewCintas(){
     '<div style="display:flex;gap:8px;align-items:flex-end"><div class="fld"><label>Bitola</label><select id="ciB">'+
     l.map(function(r,i){ return '<option value="'+i+'">'+esc(r.bitola)+"</option>"; }).join("")+"</select></div>"+
     '<div class="fld"><label>Distância do topo (mm)</label><input type="number" id="ciD" value="1000" step="10" min="0"></div>'+
-    '<button class="btn" id="ciCalc">Calcular</button></div></div><div class="panel-b" id="ciOut"></div></div>';
+    '<button class="btn" id="ciCalc">Calcular</button><button class="btn ghost" id="btnAuditoria">Auditoria de cálculo</button></div></div>'+
+    '<div class="panel-b" id="ciOut"></div></div>';
   // insere a calculadora logo abaixo do cabeçalho, antes da tabela
   var corte=h.indexOf('<div class="panel">');
   return h.slice(0,corte)+calc+h.slice(corte);
@@ -2588,6 +3826,7 @@ function desenhar(){
     case "topologia": corpo=viewTopologia(); break;
     case "queda": corpo=viewQueda(); break;
     case "esforco": corpo=viewEsforco(); break;
+    case "cintasobra": corpo=viewCintasObra(); break;
     case "usuarios": corpo=can("user.ler")?viewUsuarios():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "registro": corpo=can("log.ler")?viewRegistro():'<div class="empty"><h4>Sem permissão</h4></div>'; break;
     case "cabos": corpo=viewCabos(); break;
@@ -2598,6 +3837,8 @@ function desenhar(){
   }
   app.innerHTML='<div class="shell">'+viewRail()+'<div class="main">'+viewTop()+'<div class="content">'+corpo+"</div></div></div>";
   ligarEventos();
+  // Trocou de tela com a auditoria aberta: ela era da tela anterior.
+  if(S.aud&&S.aud.aba!==S.route) fecharAuditoria();
 }
 
 async function irPara(destino){
@@ -2689,6 +3930,16 @@ function ligarEventos(){
   var volta=document.getElementById("btnVoltar");
   if(volta) volta.addEventListener("click",function(){
     confirmarSaida(function(){ S.route="obras"; render(); }); });
+
+  /* Auditoria de cálculo da tela aberta. No cadastro de cintas ela parte da
+     bitola e da distância que estão na calculadora. */
+  var bau=document.getElementById("btnAuditoria");
+  if(bau) aoAcionar(bau,function(){
+    if(S.route==="cintas"){
+      var cb=document.getElementById("ciB"), cd=document.getElementById("ciD");
+      abrirAuditoria("cintas",cb?cb.value:null,cd?cd.value:null);
+    } else abrirAuditoria(S.route,null,null);
+  });
 
   // abas da obra — o rascunho segue aberto, não precisa confirmar nada
   document.querySelectorAll("[data-aba]").forEach(function(b){
@@ -2911,6 +4162,9 @@ function ligarEventos(){
 /* ==========================================================================
    INÍCIO
    ========================================================================== */
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"&&S.aud) fecharAuditoria();
+});
 window.addEventListener("beforeunload",function(e){
   if(emObra()&&folhaAlterada()){ e.preventDefault(); e.returnValue=""; }
 });
